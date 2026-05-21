@@ -11,7 +11,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-glm51-local-64k-c8}"
+CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-glm51-local-128k-seq4}"
 MODEL="${VLLM_MODEL:-/data/sft_aug_v1_from_0429_retry10_state_r16_no_unembed_32k_lr1e5_batch32_20260501_075124_final_fp8}"
 SERVER_PORT="${VLLM_PORT:-8000}"
 SERVER_NAME="${VLLM_SERVED_MODEL_NAME:-glm51-local-fp8}"
@@ -66,7 +66,7 @@ PY
 )
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-out_dir="${VLLM_BENCH_OUT_DIR:-${RESULT_ROOT}/vllm_glm51_64k_c8_${timestamp}}"
+out_dir="${VLLM_BENCH_OUT_DIR:-${RESULT_ROOT}/vllm_glm51_128k_seq4_${timestamp}}"
 mkdir -p "${out_dir}"
 echo "${out_dir}" >"${RESULT_ROOT}/latest_vllm_glm51_benchmark_dir.txt"
 

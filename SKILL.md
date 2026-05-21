@@ -72,8 +72,8 @@ OSS_SHA256=<optional archive sha256 for download verification>
 BASE_REPO=<base Hugging Face repo, normally zai-org/GLM-5.1>
 DOCKER_IMAGE=<normally rocm/atom-dev:vllm-latest>
 TENSOR_PARALLEL_SIZE=<normally 8 on 8-GPU MI300X>
-MAX_MODEL_LEN=<context length, default 65536 if user does not specify>
-MAX_NUM_SEQS=<concurrency budget, default 8 if user does not specify>
+MAX_MODEL_LEN=<context length, default 131072 / 128k if user does not specify>
+MAX_NUM_SEQS=<concurrency budget, default 4 if user does not specify>
 MAX_NUM_BATCHED_TOKENS=<batch token budget, default 16384 if user does not specify>
 GPU_MEMORY_UTILIZATION=<default 0.70 if user does not specify>
 VLLM_EXTRA_ARGS=<default --enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}; change only for recorded diagnostics>
@@ -254,8 +254,8 @@ After collecting the user inputs, derive:
 : "${OSS_SHA256:=}"
 : "${DOCKER_IMAGE:=rocm/atom-dev:vllm-latest}"
 : "${TENSOR_PARALLEL_SIZE:=8}"
-: "${MAX_MODEL_LEN:=65536}"
-: "${MAX_NUM_SEQS:=8}"
+: "${MAX_MODEL_LEN:=131072}"
+: "${MAX_NUM_SEQS:=4}"
 : "${MAX_NUM_BATCHED_TOKENS:=16384}"
 : "${GPU_MEMORY_UTILIZATION:=0.70}"
 DEFAULT_VLLM_EXTRA_ARGS='--enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}'
@@ -319,7 +319,7 @@ QABF16_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-qabf16"
 LOCAL_MODEL_PATH="${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-block128-qabf16"
 DURABLE_MODEL_PATH="${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-qabf16"
 MODEL_PATH="$LOCAL_MODEL_PATH"
-ENV_FILE="${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_64k_c8_tuned.env"
+ENV_FILE="${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_128k_seq4.env"
 CONTAINER_NAME="vllm-${RUN_SLUG}-atom"
 SERVED_MODEL_NAME="${RUN_SLUG}-fp8-atom"
 VENV_PYTHON="${REMOTE_ROOT}/venv-merge/bin/python"
