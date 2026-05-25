@@ -243,7 +243,7 @@ ss -ltnp 2>/dev/null | grep -E ":(7788|18080|7777)" || true
 set -euo pipefail
 mkdir -p "$SCRATCH_ROOT"/{downloads,adapters,models,serve,hf-cache,tmp,xdg-cache} "$PIP_CACHE_DIR" "$REMOTE_ROOT"/{configs,logs,models,results,scripts,request_captures}
 if ! findmnt -rn "$LOCAL_SCRATCH_MOUNT" >/dev/null 2>&1; then
-  echo "$LOCAL_SCRATCH_MOUNT is not mounted; use azure-amd-deploy-env/scripts/prepare_local_nvme.sh before model work" >&2
+  echo "$LOCAL_SCRATCH_MOUNT is not mounted; prepare local NVMe with the azure-amd-deploy-env skill before model work" >&2
   exit 3
 fi
 if command -v docker >/dev/null 2>&1; then
