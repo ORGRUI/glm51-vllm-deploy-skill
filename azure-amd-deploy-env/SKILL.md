@@ -5,7 +5,7 @@ description: Prepare and operate the Azure AMD MI300X deployment hosts used for 
 
 # Azure AMD Deploy Env
 
-This skill is self-contained. Do not rely on extra references or helper scripts when using it.
+This skill is self-contained. Do not rely on extra references or helper scripts when using it. Keep execution details lightweight: perform the checks below, use the command skeletons as starting points, and adapt only after inspecting the actual host state.
 
 ## Host Facts
 
@@ -38,176 +38,70 @@ Use the user-provided host:
 
 ```bash
 export SSH_HOST=vmadmin@IP_ADDRESS
-export SSH_PASSWORD='<password-if-needed>'
 export REMOTE_ROOT=/data/amd_profiling
 export LOCAL_SCRATCH_MOUNT=/local_nvme
+ssh -o StrictHostKeyChecking=accept-new "$SSH_HOST"
 ```
 
-Use `sshpass` only when password auth is required:
-
-```bash
-if [ -n "${SSH_PASSWORD:-}" ]; then
-  SSHPASS="$SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SSH_HOST"
-else
-  ssh -o StrictHostKeyChecking=accept-new "$SSH_HOST"
-fi
-```
+If password auth is required, use `sshpass -e` with `SSHPASS` in the environment. Prefer temporary key access when available, and remove any temporary public key you added before handing off.
 
 ## Inspect Host
 
-Run this before model work:
+Run these checks before model work. Capture enough output to justify the deployment decision.
 
 ```bash
-if [ -n "${SSH_PASSWORD:-}" ]; then
-  SSH_PREFIX=(sshpass -e ssh)
-  export SSHPASS="$SSH_PASSWORD"
-else
-  SSH_PREFIX=(ssh)
-fi
-: "${REMOTE_ROOT:=/data/amd_profiling}"
-: "${LOCAL_SCRATCH_MOUNT:=/local_nvme}"
-
-"${SSH_PREFIX[@]}" -o StrictHostKeyChecking=accept-new "$SSH_HOST" \
-  "env REMOTE_ROOT=$(printf '%q' "$REMOTE_ROOT") LOCAL_SCRATCH_MOUNT=$(printf '%q' "$LOCAL_SCRATCH_MOUNT") bash -se" <<'REMOTE'
-set -euo pipefail
-: "${REMOTE_ROOT:=/data/amd_profiling}"
-: "${LOCAL_SCRATCH_MOUNT:=/local_nvme}"
-
-echo "== host =="
-hostname
-who -b || true
-uname -a
-
-echo "== filesystems =="
+hostname; who -b || true; uname -a
 df -h / /data /data2 "$LOCAL_SCRATCH_MOUNT" /mnt 2>/dev/null || true
 findmnt -rn / /data /data2 "$LOCAL_SCRATCH_MOUNT" /mnt 2>/dev/null || true
-
-echo "== block devices =="
 lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL
 sudo blkid 2>/dev/null || true
-
-echo "== root pressure =="
-root_avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
-echo "root_avail_kb=${root_avail_kb:-unknown}"
 sudo du -shx /var/lib/docker /var/lib/containerd /tmp /var/tmp /home/*/.cache 2>/dev/null || true
-
-echo "== gpu =="
-if command -v rocm-smi >/dev/null 2>&1; then
-  rocm-smi --showproductname --showuse --showmemuse || true
-else
-  echo "rocm-smi not found"
-fi
-
-echo "== docker/containerd =="
-if command -v docker >/dev/null 2>&1; then
-  docker info --format 'DockerRootDir={{.DockerRootDir}}' || true
-  docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
-  docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}' | head -50 || true
-else
-  echo "docker not found"
-fi
-if command -v containerd >/dev/null 2>&1; then
-  containerd config dump 2>/dev/null | grep -E 'root =|state =' | head -10 || true
-else
-  echo "containerd command not found"
-fi
-
-echo "== service ports =="
+rocm-smi --showproductname --showuse --showmemuse || true
+docker info --format 'DockerRootDir={{.DockerRootDir}}' 2>/dev/null || true
+docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
 ss -ltnp 2>/dev/null | grep -E ':(7777|7788|18080|8000)' || true
-
-echo "== deployment roots =="
-ls -la "$REMOTE_ROOT" 2>/dev/null || true
-ls -la "$LOCAL_SCRATCH_MOUNT" 2>/dev/null || true
-REMOTE
+ls -la "$REMOTE_ROOT" "$LOCAL_SCRATCH_MOUNT" 2>/dev/null || true
 ```
 
-Stop before pulling images if `DockerRootDir` is outside `/data` or `/data2`. Stop before model work if root has less than 20 GiB free.
+Judgment standards:
+
+- GPU path is usable only when ROCm sees 8 MI300X-class devices.
+- Root must have at least 20 GiB free before downloads, image pulls, merge, quant, or serve work.
+- `DockerRootDir` must be under `/data` or `/data2` before pulling images. Reconfigure first if it points at `/var/lib/docker`.
+- `/data` or `/data2` must be present for durable records and final backups.
+- `/local_nvme` should be mounted on a fast local disk before any large model operation.
+- Active containers or listeners on service ports must be understood before replacing a service.
 
 ## Prepare Local NVMe
 
-Use `/local_nvme` as fast scratch. This procedure mounts an existing intended scratch filesystem or creates RAID0 `/dev/md0` only from clearly unused Azure `NVMe Direct Disk` devices:
+Use `/local_nvme` as fast scratch. Do not blindly format disks. Inspect first, then choose one of these paths:
 
 ```bash
-if [ -n "${SSH_PASSWORD:-}" ]; then
-  SSH_PREFIX=(sshpass -e ssh)
-  export SSHPASS="$SSH_PASSWORD"
-else
-  SSH_PREFIX=(ssh)
-fi
-: "${LOCAL_SCRATCH_MOUNT:=/local_nvme}"
+# Already mounted: verify it is not /mnt, has enough capacity, and is writable.
+findmnt -rn "$LOCAL_SCRATCH_MOUNT" && df -h "$LOCAL_SCRATCH_MOUNT"
+touch "$LOCAL_SCRATCH_MOUNT/.write_test" && rm -f "$LOCAL_SCRATCH_MOUNT/.write_test"
 
-"${SSH_PREFIX[@]}" -o StrictHostKeyChecking=accept-new "$SSH_HOST" \
-  "env LOCAL_SCRATCH_MOUNT=$(printf '%q' "$LOCAL_SCRATCH_MOUNT") bash -se" <<'REMOTE'
-set -euo pipefail
-: "${LOCAL_SCRATCH_MOUNT:=/local_nvme}"
-
-if [ "$LOCAL_SCRATCH_MOUNT" = "/mnt" ]; then
-  echo "Refusing to use /mnt for this Azure AMD deployment environment" >&2
-  exit 3
-fi
-
-if findmnt -rn "$LOCAL_SCRATCH_MOUNT" >/dev/null 2>&1; then
-  echo "$LOCAL_SCRATCH_MOUNT is already mounted"
-  df -h "$LOCAL_SCRATCH_MOUNT"
-  exit 0
-fi
-
-if [ -b /dev/md0 ] && sudo blkid /dev/md0 >/dev/null 2>&1; then
-  label=$(sudo blkid -s LABEL -o value /dev/md0 2>/dev/null || true)
-  if [ "$label" != "LOCAL_NVME" ] && [ -n "$label" ]; then
-    echo "/dev/md0 exists but label is not LOCAL_NVME: $label" >&2
-    exit 3
-  fi
-  sudo mkdir -p "$LOCAL_SCRATCH_MOUNT"
-  sudo mount /dev/md0 "$LOCAL_SCRATCH_MOUNT"
-  sudo chown "$(id -u):$(id -g)" "$LOCAL_SCRATCH_MOUNT"
-  df -h "$LOCAL_SCRATCH_MOUNT"
-  exit 0
-fi
-
-mapfile -t candidates < <(python3 - <<'PY'
-import shlex
-import subprocess
-
-out = subprocess.check_output(
-    ["lsblk", "-P", "-dn", "-o", "NAME,TYPE,FSTYPE,MOUNTPOINT,MODEL"],
-    text=True,
-)
-for line in out.splitlines():
-    fields = dict(item.split("=", 1) for item in shlex.split(line))
-    name = fields.get("NAME", "")
-    if (
-        fields.get("TYPE") == "disk"
-        and name.startswith("nvme")
-        and not fields.get("FSTYPE")
-        and not fields.get("MOUNTPOINT")
-        and "NVMe Direct Disk" in fields.get("MODEL", "")
-    ):
-        print("/dev/" + name)
-PY
-)
-
-if [ "${#candidates[@]}" -lt 2 ]; then
-  echo "No mounted scratch and fewer than two unused NVMe Direct Disk candidates" >&2
-  lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL >&2
-  exit 3
-fi
-
-if sudo blkid "${candidates[@]}" 2>/dev/null | grep -q .; then
-  echo "One or more NVMe candidates already has a filesystem signature; inspect manually" >&2
-  sudo blkid "${candidates[@]}" 2>/dev/null || true
-  exit 3
-fi
-
-echo "Creating RAID0 local scratch from: ${candidates[*]}"
-sudo mdadm --create /dev/md0 --level=0 --raid-devices="${#candidates[@]}" --chunk=1024K "${candidates[@]}"
-sudo mkfs.ext4 -F -L LOCAL_NVME /dev/md0
+# Existing intended RAID: only mount if /dev/md0 is clearly the LOCAL_NVME scratch volume.
+sudo blkid /dev/md0
 sudo mkdir -p "$LOCAL_SCRATCH_MOUNT"
 sudo mount /dev/md0 "$LOCAL_SCRATCH_MOUNT"
 sudo chown "$(id -u):$(id -g)" "$LOCAL_SCRATCH_MOUNT"
-df -h "$LOCAL_SCRATCH_MOUNT"
-REMOTE
+
+# Fresh scratch creation: only from unused Azure "NVMe Direct Disk" devices.
+lsblk -P -dn -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL
+sudo blkid /dev/nvme...  # candidates must have no filesystem signatures
+sudo mdadm --create /dev/md0 --level=0 --raid-devices=N --chunk=1024K /dev/nvme...
+sudo mkfs.ext4 -F -L LOCAL_NVME /dev/md0
+sudo mount /dev/md0 "$LOCAL_SCRATCH_MOUNT"
 ```
+
+Judgment standards:
+
+- Refuse `/mnt` as the scratch mount.
+- Prefer an existing mounted `/local_nvme` when it is clearly the fast scratch tier.
+- Reuse `/dev/md0` only if its label or prior evidence identifies it as the deployment scratch volume.
+- Create RAID0 only from unmounted, filesystem-free `NVMe Direct Disk` devices. Do not include OS, durable `/data`, or ambiguous devices.
+- Stop and ask for human confirmation when device identity is unclear, a candidate has a filesystem signature, or fewer than two suitable NVMe direct disks are visible.
 
 ## Safety Rules
 
