@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Quantize a merged GLM-5.1 checkpoint with Transformers FineGrainedFP8.
 
-This follows the local quantization flow from the reference script:
-
-1. Load the merged BF16 model through `AutoModelForCausalLM`.
-2. Apply `FineGrainedFP8Config` with q_a/kv_a/indexer/lm_head left BF16.
-3. Save a HF safetensors checkpoint.
-4. Rewrite sparse MoE expert shards with explicit block-128 FP8 tensors and
-   `weight_scale_inv` tensors, then update the safetensors index.
+This exports a HF-compatible `FineGrainedFP8Config` checkpoint without loading
+the full merged BF16 model onto GPUs. The export streams safetensors
+shard-by-shard, quantizes only GLM-5.1 Linear weights that should become FP8,
+and writes explicit block-128 `weight_scale_inv` tensors alongside them.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoConfig, AutoModelForCausalLM, FineGrainedFP8Config
+from transformers import AutoConfig, FineGrainedFP8Config, GenerationConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -165,6 +162,7 @@ def copy_tokenizer_artifacts(config_source: str, export_dir: Path) -> list[str]:
 def build_fp32_skip_modules(config) -> list[str]:
     layer_ids = range(int(config.num_hidden_layers))
     return [
+        "model.embed_tokens",
         "lm_head",
         *[
             f"model.layers.{layer_idx}.self_attn.indexer.weights_proj"
@@ -188,11 +186,7 @@ def normalize_glm5_config_for_fp8(config) -> None:
             config.num_experts = int(routed)
 
 
-def sanitize_generation_config_for_save(model) -> list[str]:
-    generation_config = getattr(model, "generation_config", None)
-    if generation_config is None:
-        return []
-
+def sanitize_generation_config(generation_config) -> list[str]:
     fixed: list[str] = []
     if bool(getattr(generation_config, "do_sample", False)):
         return fixed
@@ -212,6 +206,201 @@ def sanitize_generation_config_for_save(model) -> list[str]:
             setattr(generation_config, field_name, neutral_value)
             fixed.append(field_name)
     return fixed
+
+
+def sanitize_generation_config_file(config_source: str, export_dir: Path) -> list[str]:
+    try:
+        generation_config = GenerationConfig.from_pretrained(config_source)
+    except Exception:
+        return []
+    fixed = sanitize_generation_config(generation_config)
+    generation_config.save_pretrained(export_dir)
+    return fixed
+
+
+def is_skipped_module(module_name: str, modules_to_not_convert: list[str]) -> bool:
+    return any(
+        module_name == skipped or module_name.startswith(f"{skipped}.")
+        for skipped in modules_to_not_convert
+    )
+
+
+def is_quantizable_glm51_weight(
+    tensor_name: str,
+    *,
+    tensor: torch.Tensor,
+    modules_to_not_convert: list[str],
+    weight_block_size: tuple[int, int],
+) -> bool:
+    if not tensor_name.endswith(".weight"):
+        return False
+    if tensor.ndim != 2:
+        return False
+
+    module_name = tensor_name[: -len(".weight")]
+    if is_skipped_module(module_name, modules_to_not_convert):
+        return False
+
+    rows, cols = tensor.shape
+    block_m, block_n = weight_block_size
+    if rows % block_m != 0 or cols % block_n != 0:
+        return False
+
+    attention_suffixes = (
+        ".self_attn.q_b_proj.weight",
+        ".self_attn.kv_b_proj.weight",
+        ".self_attn.o_proj.weight",
+    )
+    mlp_suffixes = (
+        ".mlp.gate_proj.weight",
+        ".mlp.up_proj.weight",
+        ".mlp.down_proj.weight",
+    )
+    expert_parts = (
+        ".mlp.experts.",
+        ".mlp.shared_experts.",
+    )
+    expert_suffixes = (
+        ".gate_proj.weight",
+        ".up_proj.weight",
+        ".down_proj.weight",
+    )
+    return (
+        tensor_name.endswith(attention_suffixes)
+        or tensor_name.endswith(mlp_suffixes)
+        or (
+            any(part in tensor_name for part in expert_parts)
+            and tensor_name.endswith(expert_suffixes)
+        )
+    )
+
+
+def read_safetensors_index(model_path: Path) -> dict:
+    index_path = model_path / "model.safetensors.index.json"
+    if not index_path.is_file():
+        shard_paths = sorted(model_path.glob("*.safetensors"))
+        if not shard_paths:
+            raise RuntimeError(f"no safetensors shards found under {model_path}")
+        if len(shard_paths) != 1:
+            raise RuntimeError(
+                f"missing safetensors index for multi-shard checkpoint: {model_path}"
+            )
+        with safe_open(str(shard_paths[0]), framework="pt", device="cpu") as handle:
+            return {
+                "metadata": {},
+                "weight_map": {key: shard_paths[0].name for key in handle.keys()},
+            }
+    return json.loads(index_path.read_text())
+
+
+def export_streaming_fp8_checkpoint(
+    *,
+    base_model_path: str,
+    export_dir: Path,
+    config_source: str,
+    config,
+    quant_cfg: FineGrainedFP8Config,
+    modules_to_not_convert: list[str],
+) -> dict:
+    source_root = Path(base_model_path)
+    index_payload = read_safetensors_index(source_root)
+    source_weight_map = index_payload["weight_map"]
+    source_shards = sorted(set(source_weight_map.values()))
+    weight_block_size = tuple(quant_cfg.weight_block_size)
+    quant_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    config.quantization_config = quant_cfg.to_dict()
+    config.save_pretrained(export_dir)
+    fixed_generation_fields = sanitize_generation_config_file(config_source, export_dir)
+
+    export_weight_map: dict[str, str] = {}
+    quantized_weight_count = 0
+    copied_tensor_count = 0
+    scale_tensor_count = 0
+    shard_summaries: list[dict] = []
+
+    for shard_idx, shard_name in enumerate(source_shards, start=1):
+        shard_path = source_root / shard_name
+        out_shard_name = shard_name
+        shard_tensors: dict[str, torch.Tensor] = {}
+        shard_quantized = 0
+        shard_copied = 0
+        with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
+            for tensor_name in sorted(handle.keys()):
+                tensor = handle.get_tensor(tensor_name)
+                if is_quantizable_glm51_weight(
+                    tensor_name,
+                    tensor=tensor,
+                    modules_to_not_convert=modules_to_not_convert,
+                    weight_block_size=weight_block_size,
+                ):
+                    quantized, scale_inv = quantize_block_fp8_tensor(
+                        tensor,
+                        block_size=weight_block_size,
+                        device=quant_device,
+                    )
+                    scale_name = tensor_name[: -len(".weight")] + ".weight_scale_inv"
+                    shard_tensors[tensor_name] = quantized.contiguous()
+                    shard_tensors[scale_name] = scale_inv.contiguous()
+                    export_weight_map[tensor_name] = out_shard_name
+                    export_weight_map[scale_name] = out_shard_name
+                    quantized_weight_count += 1
+                    scale_tensor_count += 1
+                    shard_quantized += 1
+                else:
+                    shard_tensors[tensor_name] = tensor.contiguous()
+                    export_weight_map[tensor_name] = out_shard_name
+                    copied_tensor_count += 1
+                    shard_copied += 1
+                del tensor
+
+        save_file(
+            shard_tensors, str(export_dir / out_shard_name), metadata={"format": "pt"}
+        )
+        shard_summaries.append(
+            {
+                "shard": out_shard_name,
+                "quantized_weight_count": shard_quantized,
+                "copied_tensor_count": shard_copied,
+            }
+        )
+        print(
+            json.dumps(
+                {
+                    "phase": "streaming_shard_done",
+                    "shard_index": shard_idx,
+                    "shard_count": len(source_shards),
+                    **shard_summaries[-1],
+                },
+                ensure_ascii=True,
+            ),
+            flush=True,
+        )
+        del shard_tensors
+        if quant_device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    total_size = sum(path.stat().st_size for path in export_dir.glob("*.safetensors"))
+    export_index_payload = {
+        "metadata": dict(index_payload.get("metadata") or {}),
+        "weight_map": export_weight_map,
+    }
+    export_index_payload["metadata"]["total_size"] = total_size
+    (export_dir / "model.safetensors.index.json").write_text(
+        json.dumps(export_index_payload, ensure_ascii=True, indent=2)
+    )
+    copied_tokenizer_artifacts = copy_tokenizer_artifacts(config_source, export_dir)
+
+    return {
+        "quantized_weight_count": quantized_weight_count,
+        "copied_tensor_count": copied_tensor_count,
+        "scale_tensor_count": scale_tensor_count,
+        "source_shard_count": len(source_shards),
+        "total_safetensors_bytes": total_size,
+        "generation_config_sanitized_fields": fixed_generation_fields,
+        "tokenizer_artifacts_copied": copied_tokenizer_artifacts,
+        "shard_summaries": shard_summaries,
+    }
 
 
 def quantize_block_fp8_tensor(
@@ -253,6 +442,7 @@ def rewrite_moe_expert_shards(
     export_dir: Path,
     weight_block_size: tuple[int, int],
 ) -> list[str]:
+    """Compatibility no-op for exports that already stream expert scales."""
     source_root = Path(base_model_path)
     source_index_path = source_root / "model.safetensors.index.json"
     if not source_index_path.is_file():
@@ -264,6 +454,24 @@ def rewrite_moe_expert_shards(
     source_weight_map = json.loads(source_index_path.read_text())["weight_map"]
     index_payload = json.loads(export_index_path.read_text())
     weight_map = index_payload["weight_map"]
+    already_quantized = [
+        name
+        for name in weight_map
+        if ".mlp.experts." in name and name.endswith(".weight_scale_inv")
+    ]
+    if already_quantized:
+        print(
+            json.dumps(
+                {
+                    "phase": "moe_fix_skipped",
+                    "reason": "streaming_export_already_wrote_expert_scales",
+                    "expert_scale_count": len(already_quantized),
+                },
+                ensure_ascii=True,
+            ),
+            flush=True,
+        )
+        return []
     mlp_layer_types = list(getattr(config, "mlp_layer_types", []))
     if not mlp_layer_types:
         raise RuntimeError("config.mlp_layer_types is empty")
@@ -348,7 +556,6 @@ def main() -> None:
     cuda_count = torch.cuda.device_count()
     if cuda_count < 1:
         raise RuntimeError("FP8 quantization requires at least one visible CUDA device")
-    max_memory = {i: "130GiB" for i in range(cuda_count)}
 
     config_source = resolve_config_source(args.base_model_path)
     print(
@@ -395,13 +602,13 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "phase": "load_start",
+                "phase": "streaming_export_start",
                 "base_model_path": args.base_model_path,
                 "export_dir": str(export_dir),
                 "cuda_count": cuda_count,
-                "max_memory": max_memory,
                 "quant_method": "fp8",
                 "quantizer": "FineGrainedFP8Config",
+                "strategy": "safetensors_streaming",
                 "modules_to_not_convert_count": len(modules_to_not_convert),
                 "modules_to_not_convert_sample": modules_to_not_convert[:4],
             },
@@ -410,62 +617,50 @@ def main() -> None:
         flush=True,
     )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.base_model_path,
+    export_summary = export_streaming_fp8_checkpoint(
+        base_model_path=args.base_model_path,
+        export_dir=export_dir,
+        config_source=config_source,
         config=config,
-        cache_dir=args.cache_dir,
-        quantization_config=quant_cfg,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        max_memory=max_memory,
-        low_cpu_mem_usage=True,
-        trust_remote_code=args.trust_remote_code,
+        quant_cfg=quant_cfg,
+        modules_to_not_convert=modules_to_not_convert,
     )
-    model.eval()
-
     print(
         json.dumps(
             {
-                "phase": "load_done",
-                "quantization_method": str(getattr(model, "quantization_method", None)),
-                "is_quantized": bool(getattr(model, "is_quantized", False)),
+                "phase": "streaming_export_done",
+                **{
+                    key: value
+                    for key, value in export_summary.items()
+                    if key != "shard_summaries"
+                },
             },
             ensure_ascii=True,
         ),
         flush=True,
     )
-    quantization_method = str(getattr(model, "quantization_method", None))
-    is_quantized = bool(getattr(model, "is_quantized", False))
-
-    fixed_generation_fields = sanitize_generation_config_for_save(model)
-    if fixed_generation_fields:
+    if export_summary["generation_config_sanitized_fields"]:
         print(
             json.dumps(
                 {
                     "phase": "generation_config_sanitized",
-                    "fields": fixed_generation_fields,
+                    "fields": export_summary["generation_config_sanitized_fields"],
                 },
                 ensure_ascii=True,
             ),
             flush=True,
         )
-
-    model.save_pretrained(export_dir, safe_serialization=True, max_shard_size="10GB")
-    copied_tokenizer_artifacts = copy_tokenizer_artifacts(config_source, export_dir)
-    if copied_tokenizer_artifacts:
+    if export_summary["tokenizer_artifacts_copied"]:
         print(
             json.dumps(
                 {
                     "phase": "tokenizer_artifacts_copied",
-                    "files": copied_tokenizer_artifacts,
+                    "files": export_summary["tokenizer_artifacts_copied"],
                 },
                 ensure_ascii=True,
             ),
             flush=True,
         )
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     fixed_shards = rewrite_moe_expert_shards(
         base_model_path=args.base_model_path,
@@ -478,11 +673,17 @@ def main() -> None:
         "base_model_path": args.base_model_path,
         "export_dir": str(export_dir),
         "cuda_count": cuda_count,
-        "quantization_method": quantization_method,
-        "is_quantized": is_quantized,
+        "quantization_method": "fp8",
+        "is_quantized": True,
         "quantizer": "FineGrainedFP8Config",
+        "strategy": "safetensors_streaming",
         "modules_to_not_convert_count": len(modules_to_not_convert),
         "modules_to_not_convert": modules_to_not_convert,
+        **{
+            key: value
+            for key, value in export_summary.items()
+            if key != "shard_summaries"
+        },
         "moe_fix_shard_count": len(fixed_shards),
     }
     (export_dir / "fp8_quant_meta.json").write_text(

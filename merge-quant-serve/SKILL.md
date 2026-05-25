@@ -72,7 +72,7 @@ If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the reso
 - `scripts/prefetch_glm51_base.py`: prefetch GLM-5.1 base shards into local NVMe HF cache.
 - `scripts/merge_glm51_lora_sharded.py`: merge LoRA into BF16 model shards, expand sparse expert representatives, reconstruct lm_head shards when possible, and emit `merge_summary.json`.
 - `scripts/validate_and_repair_safetensors_shards.py`: validate merged shard integrity and repair dangling links.
-- `scripts/quantize_glm51_fp8_block128.py`: produce attachment-style `FineGrainedFP8Config` block-128 artifact, then rewrite MoE expert shards with `weight_scale_inv`.
+- `scripts/quantize_glm51_fp8_block128.py`: produce attachment-style `FineGrainedFP8Config` block-128 artifact by streaming safetensors shards and writing `weight_scale_inv` tensors directly, including MoE experts.
 - `scripts/serve_vllm_glm51.sh`: launch vLLM + ATOM backend.
 - `scripts/capture_proxy.py` and `scripts/serve_capture_proxy.sh`: OpenAI-compatible capture/rewrite proxy.
 - `scripts/serve_caddy_proxy.sh`: public `:7777` Caddy proxy.
@@ -80,7 +80,7 @@ If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the reso
 
 ## Quantization Contract
 
-The default artifact is `${RUN_SLUG}-merged-fp8-finegrained-block128`. It follows the attachment flow: Transformers `FineGrainedFP8Config` exports block-128 FP8, then sparse MoE expert `gate_proj` / `up_proj` / `down_proj` shards are rewritten explicitly with FP8 e4m3 weights and `weight_scale_inv`; embeddings, norms, routers/gates, `lm_head`, q_a / kv_a compatibility modules, and indexer compatibility modules stay unconverted.
+The default artifact is `${RUN_SLUG}-merged-fp8-finegrained-block128`. It follows the attachment flow semantics without constructing the full BF16 model in GPU memory: the quantizer streams source safetensors shards, writes block-128 FP8 e4m3 Linear weights plus `weight_scale_inv`, and leaves embeddings, norms, routers/gates, `lm_head`, q_a / kv_a compatibility modules, and indexer compatibility modules unconverted. Sparse MoE expert `gate_proj` / `up_proj` / `down_proj` weights are emitted with their scale tensors during the same streaming pass.
 
 Keep `self_attn.q_a_proj.weight` and `self_attn.kv_a_proj_with_mqa.weight` in BF16 in this attachment-style path. Expected representative unconverted shapes:
 
