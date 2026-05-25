@@ -21,21 +21,19 @@ KV_CACHE_DTYPE="${VLLM_KV_CACHE_DTYPE:-bfloat16}"
 SOURCE_DIR="${VLLM_SOURCE_DIR:-}"
 HOST="${VLLM_HOST:-0.0.0.0}"
 PORT="${VLLM_PORT:-8000}"
-CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-glm51-local-128k-seq4}"
+CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-glm51-local-64k-seq2}"
 SERVER_NAME="${VLLM_SERVED_MODEL_NAME:-glm51-local-fp8}"
-MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-131072}"
-MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
-MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
-GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.85}"
+MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
+MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-2}"
+MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-65536}"
+GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.60}"
 HF_HOME="${HF_HOME:-${ROOT}/hf-cache}"
 HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
 SUDO_PASSWORD="${SUDO_PASSWORD:-}"
-# Keep prefix caching enabled while avoiding the full decode CUDAGraph replay path.
-# 2026-05-20/21 diagnostics localized the 52.180.70.213 NaN/garbling issue
-# to FULL_AND_PIECEWISE; PIECEWISE kept prefix caching enabled and did not
-# reproduce in the tested c8 sample.
-DEFAULT_VLLM_EXTRA_ARGS='--enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}'
+# OPE-13 recovered official-partial service used this runtime path for the
+# 10k long Chinese/repeated-prefix validation.
+DEFAULT_VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching'
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-$DEFAULT_VLLM_EXTRA_ARGS}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-rocm}"
 VLLM_TRUST_REMOTE_CODE="${VLLM_TRUST_REMOTE_CODE:-1}"

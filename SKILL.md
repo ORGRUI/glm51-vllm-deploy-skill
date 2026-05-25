@@ -1,6 +1,6 @@
 ---
 name: glm51-merge-quant-vllm-deploy
-description: Standalone workflow for deploying a GLM-5.1 LoRA from either a Tinker checkpoint URL or an OSS HTTP(S) archive download link: optionally convert Tinker to signed OSS, download and extract the archive on the target host, convert PEFT or raw Tinker weights to a PEFT adapter, merge into BF16 shards, quantize to FP8 block-128 with q_a BF16 patching, launch vLLM + ATOM, start capture proxy/Caddy, run smoke tests and benchmarks, and preserve launch records.
+description: Standalone workflow for deploying a GLM-5.1 LoRA from either a Tinker checkpoint URL or an OSS HTTP(S) archive download link: optionally convert Tinker to signed OSS, download and extract the archive on the target host, convert PEFT or raw Tinker weights to a PEFT adapter, merge into BF16 shards, quantize to corrected official-partial FP8 block-128, launch vLLM + ATOM, start capture proxy/Caddy, run smoke tests and benchmarks, and preserve launch records.
 ---
 
 # GLM-5.1 OSS LoRA Merge, Quant, vLLM + ATOM Deploy
@@ -72,11 +72,11 @@ OSS_SHA256=<optional archive sha256 for download verification>
 BASE_REPO=<base Hugging Face repo, normally zai-org/GLM-5.1>
 DOCKER_IMAGE=<normally rocm/atom-dev:vllm-latest>
 TENSOR_PARALLEL_SIZE=<normally 8 on 8-GPU MI300X>
-MAX_MODEL_LEN=<context length, default 131072 / 128k if user does not specify>
-MAX_NUM_SEQS=<concurrency budget, default 4 if user does not specify>
-MAX_NUM_BATCHED_TOKENS=<batch token budget, default 16384 if user does not specify>
-GPU_MEMORY_UTILIZATION=<default 0.70 if user does not specify>
-VLLM_EXTRA_ARGS=<default --enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}; change only for recorded diagnostics>
+MAX_MODEL_LEN=<context length, default 65536 / 64k if user does not specify>
+MAX_NUM_SEQS=<concurrency budget, default 2 if user does not specify>
+MAX_NUM_BATCHED_TOKENS=<batch token budget, default 65536 if user does not specify>
+GPU_MEMORY_UTILIZATION=<default 0.60 if user does not specify>
+VLLM_EXTRA_ARGS=<default --async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching; change only for recorded diagnostics>
 FORCE_TEMPERATURE=<proxy rewrite temperature, default 1; set empty to disable>
 DEFAULT_MAX_TOKENS=<optional proxy default max_tokens, often 8192>
 NORMALIZE_TOOL_CALL_ARGUMENTS=<proxy compatibility normalization, default 1>
@@ -97,7 +97,7 @@ DATA_DISK=<first path component of REMOTE_ROOT, then verify with df -h>
 RUN_SLUG=<sanitized OSS URL path basename without archive suffix>
 SCRATCH_ROOT=${LOCAL_SCRATCH_MOUNT}/amd_profiling/${RUN_SLUG}
 HF_CACHE_DIR=${SCRATCH_ROOT}/hf-cache
-DURABLE_MODEL_PATH=${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-qabf16
+DURABLE_MODEL_PATH=${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-official-partial
 ATOM_SOURCE_DIR=${REMOTE_ROOT}/atom-fork if that directory exists
 ```
 
@@ -116,7 +116,7 @@ prefetch_glm51_base.py
 merge_glm51_lora_sharded.py
 validate_and_repair_safetensors_shards.py
 quantize_glm51_fp8_block128.py
-patch_glm51_fp8_qabf16.py
+patch_glm51_fp8_qabf16.py (diagnostic only; not part of the default deploy path)
 serve_vllm_glm51.sh
 capture_proxy.py
 serve_capture_proxy.sh
@@ -130,14 +130,14 @@ For MI300X/ROCm PyTorch, use `cuda:N` device strings for GPU compute; `cuda:0` m
 
 ## Known amd3 Production Version
 
-For `amd3` GLM-5.1 QABF16 production service, start the ATOM/vLLM backend with:
+For the validated `amd3` GLM-5.1 corrected official-partial FP8 service, start the ATOM/vLLM backend with:
 
 ```text
 DOCKER_IMAGE=rocm/atom-dev:vllm-latest
 ATOM_SOURCE_DIR=/data/amd_profiling/atom-fork
 ATOM GitHub URL=https://github.com/san-tian/ATOM/tree/prod/glm51-qabf16-vllm
 ATOM production commit=2088bff453392d701a397d9e5008c9a400fc6eb1
-VLLM_EXTRA_ARGS=--enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}
+VLLM_EXTRA_ARGS=--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching
 ```
 
 On a new host, clone or fetch `https://github.com/san-tian/ATOM.git`, then checkout the fixed production commit:
@@ -150,9 +150,37 @@ git -C "$ATOM_SOURCE_DIR" checkout 2088bff453392d701a397d9e5008c9a400fc6eb1
 
 The local branch name is irrelevant; a detached checkout at the production commit is acceptable and avoids per-machine branch maintenance. Keep `VLLM_SOURCE_DIR=$ATOM_SOURCE_DIR` so the container uses that checkout through `PYTHONPATH` and `ATOM_SOURCE_DIR`. Do not use the official image's bundled source for amd3 normal recovery: on 2026-05-18, official non-eager loaded all shards but did not open `7788`, and official `--enforce-eager` was too slow for production throughput.
 
-Keep prefix caching enabled for ROCm/ATOM FP8 GLM-5.1 production launches, but avoid the default full decode CUDAGraph replay path by using `cudagraph_mode=PIECEWISE`. On 2026-05-20/21, `52.180.70.213` reproduced c8 NaN hidden states and garbled output under default `FULL_AND_PIECEWISE`, while `--compilation-config={"cudagraph_mode":"PIECEWISE"}` did not reproduce in the tested sample with prefix caching still enabled. This keeps prompt/prefix-cache benefits while avoiding the most suspicious full decode graph path. An older broad mitigation disabled prefix caching, but the newer 52.180.70.213 trace narrowed the preferred mitigation to PIECEWISE CUDAGraph with prefix caching on.
+The OPE-13 recovered service used prefix caching, async scheduling, and `cudagraph_mode=FULL_AND_PIECEWISE` at 64k context with `max_num_seqs=2` and `max_num_batched_tokens=65536`. Earlier diagnostics on another host had used PIECEWISE as a runtime mitigation, but do not substitute that older runtime path when reproducing the current corrected `official-partial` result unless the user asks for an explicit runtime A/B.
 
 The backend launch script writes `source_git` into `*.server_argv.json`. Treat that field, plus the wrapper script and env file, as the startup source of truth.
+
+## Corrected Official-Partial Quant Contract
+
+The default quantized artifact is the corrected `official-partial` model:
+
+```text
+${RUN_SLUG}-merged-fp8-block128-official-partial
+```
+
+It follows the official GLM-5.1 FP8 coverage: attention projection linears, MLP linears, and MoE expert linears use FP8 e4m3 block-128 weights with `weight_scale_inv`; embeddings, norms, routers/gates, `lm_head`, and indexer compatibility modules stay unconverted. In particular, `self_attn.q_a_proj.weight` and `self_attn.kv_a_proj_with_mqa.weight` must remain in the FP8 quantization contract. Do not add those projection modules to `modules_to_not_convert`, and do not run the q_a BF16 patch as part of the normal deployment path.
+
+`kv_a_proj_with_mqa` has an output dimension of 576, so the quantizer must support ceil/padded block quantization. The expected representative shapes are:
+
+```text
+q_a_proj.weight              FP8 [2048, 6144], scale_inv [16, 48]
+kv_a_proj_with_mqa.weight    FP8 [576, 6144],  scale_inv [5, 48]
+q_b/kv_b/o_proj and MLP/MoE  FP8 block-128, scale_inv [ceil(out/128), ceil(in/128)]
+embed_tokens and lm_head     BF16, no scale_inv
+```
+
+The older `*-merged-fp8-block128-qabf16` artifact is superseded and diagnostic only. It leaves q_a, or in older broken flows q_a plus kv_a, outside the official FP8 coverage and must not be used as the default deploy artifact or as evidence about corrected `official-partial` quality.
+
+Validation record from OPE-13:
+
+- Corrected `official-partial` static check: `q_a_proj` and `kv_a_proj_with_mqa` are FP8 and have scale tensors; `scale_inv_count=59158`, `quant_weight_count=59158`.
+- 100-prompt harness: 100/100 success, judge accuracy 0.98, empty 0.
+- 10,000 long Chinese/repeated-prefix requests with prefix caching and proxy-disabled thinking: HTTP 10000/10000, strict clean 9997/10000, mojibake 0, prefix echo 0, reasoning anomaly 0.
+- BF16 merge-only did not serve under the tested vLLM/ATOM TP=8 memory envelope, so do not claim a BF16-vs-FP8 same-prompt regression result from that run.
 
 ## Compatibility
 
@@ -179,11 +207,11 @@ Do not replace this with an unlisted local base-model copy or another repo unles
 
 ## Local NVMe Scratch Policy
 
-Use the durable disk for launch records, logs, service state, Docker image/cache state, and the durable model backup, normally `/data` through `REMOTE_ROOT`. All model-work paths must use local NVMe: OSS archive extraction, PEFT adapter staging, Hugging Face base-model cache, BF16 merge output, FP8 quant output, q_a BF16 patch output, the serving-time HF cache, and the primary live serving model. Do not run merge or quantization with any of these paths under `/data`; if `/local_nvme` is unavailable, mount or recreate the local NVMe scratch volume first.
+Use the durable disk for launch records, logs, service state, Docker image/cache state, and the durable model backup, normally `/data` through `REMOTE_ROOT`. All model-work paths must use local NVMe: OSS archive extraction, PEFT adapter staging, Hugging Face base-model cache, BF16 merge output, corrected official-partial FP8 quant output, optional diagnostic q_a BF16 patch output, the serving-time HF cache, and the primary live serving model. Do not run merge or quantization with any of these paths under `/data`; if `/local_nvme` is unavailable, mount or recreate the local NVMe scratch volume first.
 
 Never download model archives, Hugging Face shards, merge outputs, quantization outputs, Docker layers, containerd layers, pip wheels, or temporary extraction files onto the OS root filesystem. Do not use `/`, `/tmp`, `/var/tmp`, `/var/lib/docker`, `/var/lib/containerd`, `/home/<user>/.cache`, or `/mnt` for model work. Use only:
 
-- `/local_nvme` for ephemeral high-throughput scratch, downloads, extraction, HF cache, merge, quant, q_a BF16 patch output, and live serving.
+- `/local_nvme` for ephemeral high-throughput scratch, downloads, extraction, HF cache, merge, corrected official-partial quant, optional diagnostic q_a BF16 patch output, and live serving.
 - `/data` for durable logs, scripts, launch records, Docker/containerd state, persistent caches, and final model backups.
 
 At preflight and before every large download, require:
@@ -206,12 +234,12 @@ The preferred live model path is local NVMe:
 
 ```text
 MODEL_PATH=$LOCAL_MODEL_PATH
-LOCAL_MODEL_PATH=${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-block128-qabf16
+LOCAL_MODEL_PATH=${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-block128-official-partial
 ```
 
 After quantization, start vLLM from `LOCAL_MODEL_PATH` and sync the same model to `DURABLE_MODEL_PATH` under `/data` in the background for persistence. If the host has rebooted or local NVMe was recreated, recreate/mount `/local_nvme` and restore `LOCAL_MODEL_PATH` from `DURABLE_MODEL_PATH` before starting vLLM. Do not serve directly from `/data` in this workflow; that is only an emergency manual recovery path after explicit operator acceptance.
 
-If the target server does not have the local scratch mount, initialize and mount it before downloading the OSS archive or touching model files. Do not continue to download, merge, quantize, patch, or start a normal service until this succeeds. Default to:
+If the target server does not have the local scratch mount, initialize and mount it before downloading the OSS archive or touching model files. Do not continue to download, merge, quantize, run optional diagnostics, or start a normal service until this succeeds. Default to:
 
 ```text
 LOCAL_SCRATCH_MOUNT=/local_nvme
@@ -254,11 +282,11 @@ After collecting the user inputs, derive:
 : "${OSS_SHA256:=}"
 : "${DOCKER_IMAGE:=rocm/atom-dev:vllm-latest}"
 : "${TENSOR_PARALLEL_SIZE:=8}"
-: "${MAX_MODEL_LEN:=131072}"
-: "${MAX_NUM_SEQS:=4}"
-: "${MAX_NUM_BATCHED_TOKENS:=16384}"
-: "${GPU_MEMORY_UTILIZATION:=0.70}"
-DEFAULT_VLLM_EXTRA_ARGS='--enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}'
+: "${MAX_MODEL_LEN:=65536}"
+: "${MAX_NUM_SEQS:=2}"
+: "${MAX_NUM_BATCHED_TOKENS:=65536}"
+: "${GPU_MEMORY_UTILIZATION:=0.60}"
+DEFAULT_VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching'
 : "${VLLM_EXTRA_ARGS:=$DEFAULT_VLLM_EXTRA_ARGS}"
 : "${FORCE_TEMPERATURE=1}"
 : "${DEFAULT_MAX_TOKENS:=8192}"
@@ -314,12 +342,12 @@ PIP_CACHE_DIR="${REMOTE_ROOT}/pip-cache"
 OSS_WORK_DIR="${SCRATCH_ROOT}/downloads/${RUN_SLUG}"
 PEFT_ADAPTER="${SCRATCH_ROOT}/adapters/${RUN_SLUG}-peft"
 BF16_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged"
-FP8_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-block128"
-QABF16_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-qabf16"
-LOCAL_MODEL_PATH="${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-block128-qabf16"
-DURABLE_MODEL_PATH="${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-qabf16"
+FP8_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-official-partial"
+QABF16_DIAGNOSTIC_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-qabf16-diagnostic"
+LOCAL_MODEL_PATH="${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-block128-official-partial"
+DURABLE_MODEL_PATH="${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-block128-official-partial"
 MODEL_PATH="$LOCAL_MODEL_PATH"
-ENV_FILE="${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_128k_seq4.env"
+ENV_FILE="${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_64k_seq2.env"
 CONTAINER_NAME="vllm-${RUN_SLUG}-atom"
 SERVED_MODEL_NAME="${RUN_SLUG}-fp8-atom"
 VENV_PYTHON="${REMOTE_ROOT}/venv-merge/bin/python"
@@ -350,6 +378,8 @@ BASE_REPO
 RUN_SLUG
 OSS_WORK_DIR
 PEFT_ADAPTER
+FP8_OUT
+QABF16_DIAGNOSTIC_OUT, only if an explicit diagnostic A/B is requested
 MODEL_PATH
 PREFETCH_WORKERS
 EXTRACT_WORKERS
@@ -507,7 +537,7 @@ PY
 "
 ```
 
-After this step, fail the deployment unless `findmnt -rn "$LOCAL_SCRATCH_MOUNT"` succeeds and the filesystem has enough space for BF16, FP8, q_a BF16, and HF cache intermediates. Do not overwrite an existing md device or filesystem unless it is clearly the intended ephemeral local NVMe scratch array.
+After this step, fail the deployment unless `findmnt -rn "$LOCAL_SCRATCH_MOUNT"` succeeds and the filesystem has enough space for BF16, corrected FP8, optional diagnostics, and HF cache intermediates. Do not overwrite an existing md device or filesystem unless it is clearly the intended ephemeral local NVMe scratch array.
 
 Docker must not store images/layers on the OS disk. During preflight, probe Docker and the target image only; do not pull images yet. If Docker is missing, let the conditional preparation phase install/start it when possible. If Docker exists but `DockerRootDir` is outside `DATA_DISK`, record that it must be migrated before any image pull or service start:
 
@@ -998,14 +1028,14 @@ sshpass -e ssh "$SSH_HOST" "
 "
 ```
 
-Before merge, quantization, q_a patching, and service env creation, assert that every heavy model path resolves under local NVMe:
+Before merge, quantization, optional diagnostics, and service env creation, assert that every heavy model path resolves under local NVMe:
 
 ```bash
 export SSHPASS="$SSH_PASSWORD"
 sshpass -e ssh "$SSH_HOST" "
   set -euo pipefail
   findmnt -rn '$LOCAL_SCRATCH_MOUNT' >/dev/null
-  for p in '$HF_CACHE_DIR' '$OSS_WORK_DIR' '$PEFT_ADAPTER' '$BF16_OUT' '$FP8_OUT' '$QABF16_OUT' '$LOCAL_MODEL_PATH'; do
+  for p in '$HF_CACHE_DIR' '$OSS_WORK_DIR' '$PEFT_ADAPTER' '$BF16_OUT' '$FP8_OUT' '$QABF16_DIAGNOSTIC_OUT' '$LOCAL_MODEL_PATH'; do
     resolved=\$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=False))' \"\$p\")
     case \"\$resolved\" in '$LOCAL_SCRATCH_MOUNT'/*) ;;
       *) echo \"heavy model path is not under $LOCAL_SCRATCH_MOUNT: \$p -> \$resolved\" >&2; exit 3 ;;
@@ -1020,7 +1050,7 @@ Remove stale intermediate outputs, then run a fresh merge. Do not use resume for
 export SSHPASS="$SSH_PASSWORD"
 sshpass -e ssh "$SSH_HOST" "
   set -euo pipefail
-  rm -rf '$BF16_OUT' '$FP8_OUT' '$QABF16_OUT' '$LOCAL_MODEL_PATH'
+  rm -rf '$BF16_OUT' '$FP8_OUT' '$QABF16_DIAGNOSTIC_OUT' '$LOCAL_MODEL_PATH'
   HF_HOME='$HF_CACHE_DIR' '$VENV_PYTHON' '$REMOTE_ROOT/scripts/merge_glm51_lora_sharded.py' \
     --base-repo '$BASE_REPO' \
     --adapter-repo '$RESOLVED_ADAPTER' \
@@ -1061,12 +1091,14 @@ sshpass -e ssh "$SSH_HOST" "
     --src '$BF16_OUT' \
     --out '$FP8_OUT' \
     --workers '$QUANT_WORKERS' \
-	    --cache-dir '$HF_CACHE_DIR' \
-	    --devices '$QUANT_DEVICES'
-	"
-	```
+    --cache-dir '$HF_CACHE_DIR' \
+    --devices '$QUANT_DEVICES'
+"
+```
 
-Patch `q_a_proj.weight` tensors back to BF16:
+This is the default serving artifact. It must include FP8 `q_a_proj` and `kv_a_proj_with_mqa` tensors and their `weight_scale_inv` entries.
+
+Optional diagnostic only: restore selected tensors such as `q_a_proj.weight` back to BF16 for a controlled A/B run. Do not run this in the normal deployment path, and do not serve the diagnostic output unless the user explicitly asks for this experiment:
 
 ```bash
 export SSHPASS="$SSH_PASSWORD"
@@ -1075,24 +1107,24 @@ sshpass -e ssh "$SSH_HOST" "
   HF_HOME='$HF_CACHE_DIR' '$VENV_PYTHON' '$REMOTE_ROOT/scripts/patch_glm51_fp8_qabf16.py' \
     --fp8-src '$FP8_OUT' \
     --bf16-src '$BF16_OUT' \
-    --out '$QABF16_OUT' \
+    --out '$QABF16_DIAGNOSTIC_OUT' \
     --copy-mode hardlink
 "
 ```
 
-For the known GLM-5.1 shape, the patch manifest should report `q_a_proj_restored=79` and `affected_shards=78`. Treat different counts as a signal to inspect the model structure.
+For the known GLM-5.1 shape, the diagnostic patch manifest should report `q_a_proj_restored=79` and `affected_shards=78` when patching only q_a. Treat different counts as a signal to inspect the model structure. This diagnostic artifact is superseded for production and must not replace `FP8_OUT`.
 
-Prepare the local live model path before creating the serving env file. Prefer hardlinks from `QABF16_OUT` when both paths are on local NVMe:
+Prepare the local live model path before creating the serving env file. Prefer hardlinks from `FP8_OUT` when both paths are on local NVMe:
 
 ```bash
 export SSHPASS="$SSH_PASSWORD"
 sshpass -e ssh "$SSH_HOST" "
   set -euo pipefail
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete --link-dest='$QABF16_OUT' '$QABF16_OUT/' '$LOCAL_MODEL_PATH/'
+    rsync -a --delete --link-dest='$FP8_OUT' '$FP8_OUT/' '$LOCAL_MODEL_PATH/'
   else
     rm -rf '$LOCAL_MODEL_PATH'
-    cp -al '$QABF16_OUT' '$LOCAL_MODEL_PATH'
+    cp -al '$FP8_OUT' '$LOCAL_MODEL_PATH'
   fi
   test -f '$LOCAL_MODEL_PATH/model.safetensors.index.json'
 "
@@ -1224,7 +1256,7 @@ CADDY_CONTAINER_NAME=${CONTAINER_NAME}-caddy
 EOF"
 ```
 
-Do not replace `VLLM_EXTRA_ARGS=--enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}` with `--enforce-eager` for normal throughput unless a specific diagnostic requires it and the tradeoff is recorded. If diagnostic vLLM args are needed, append them carefully and preserve prefix caching plus PIECEWISE CUDAGraph unless the diagnostic is explicitly testing those runtime paths.
+Do not replace `VLLM_EXTRA_ARGS=--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching` with `--enforce-eager` for normal throughput unless a specific diagnostic requires it and the tradeoff is recorded. If diagnostic vLLM args are needed, append them carefully and preserve which runtime path is being tested.
 
 Effective vLLM command:
 
@@ -1245,8 +1277,9 @@ vllm serve <LOCAL_MODEL_PATH>
   --reasoning-parser glm45
   --chat-template-content-format string
   --trust-remote-code
+  --async-scheduling
   --enable-prefix-caching
-  --compilation-config={"cudagraph_mode":"PIECEWISE"}
+  --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"}
 ```
 
 ## Start Backend, Proxy, And Caddy
@@ -1402,9 +1435,10 @@ sshpass -e ssh "$SSH_HOST" "
   printf '%s\n' \"\${containers[@]}\" | grep -Fx '${CONTAINER_NAME}-caddy' >/dev/null
   grep -q 'bind 0.0.0.0' '$REMOTE_ROOT/configs/Caddyfile.capture-proxy'
   grep -q '^VLLM_EXTRA_ARGS=.*--enable-prefix-caching' '$ENV_FILE'
-  grep -q '^VLLM_EXTRA_ARGS=.*cudagraph_mode.*PIECEWISE' '$ENV_FILE'
+  grep -q '^VLLM_EXTRA_ARGS=.*--async-scheduling' '$ENV_FILE'
+  grep -q '^VLLM_EXTRA_ARGS=.*cudagraph_mode.*FULL_AND_PIECEWISE' '$ENV_FILE'
   LOG=\$(ls -t '$REMOTE_ROOT'/logs/vllm_glm51_*.log | head -1)
-  grep -E 'enable_prefix_caching=True|CUDAGraphMode\\.PIECEWISE|cudagraph_mode.*PIECEWISE' \"\$LOG\" | tail -10 || true
+  grep -E 'enable_prefix_caching=True|async_scheduling=True|Asynchronous scheduling is enabled|FULL_AND_PIECEWISE|cudagraph_mode.*FULL_AND_PIECEWISE' \"\$LOG\" | tail -10 || true
   test -f '$LOCAL_MODEL_PATH/model.safetensors.index.json'
   if [ -f '$DURABLE_MODEL_PATH/model.safetensors.index.json' ]; then
     echo 'durable model copy exists'
@@ -1524,10 +1558,10 @@ If the capture proxy forces temperature, fills missing `max_tokens`, masks repla
 ## Failure Rules
 
 - Existing shard count is not enough; validate safetensors headers.
-- `/local_nvme` is a hard prerequisite for this workflow. If it is missing, mount or recreate the local NVMe scratch volume before downloads, merge, quantization, q_a BF16 patching, or normal serving. Do not move these stages to `/data` for convenience; `/data` is only for logs, scripts, Docker/containerd state, and durable model backup.
+- `/local_nvme` is a hard prerequisite for this workflow. If it is missing, mount or recreate the local NVMe scratch volume before downloads, merge, quantization, optional diagnostics, or normal serving. Do not move these stages to `/data` for convenience; `/data` is only for logs, scripts, Docker/containerd state, and durable model backup.
 - `/v1/models` is not enough; run semantic completion smoke through the full chain.
-- Loader-clean pure block-128 FP8 may still fail semantically; use the q_a BF16 patch and smoke-test language output.
-- Keep `--enable-prefix-caching --compilation-config={"cudagraph_mode":"PIECEWISE"}` in `VLLM_EXTRA_ARGS` for ROCm/ATOM FP8 GLM-5.1 launches. Only change this for an explicit runtime A/B test, and record whether the test changes prefix caching, CUDAGraph mode, or both.
+- Loader-clean block-128 FP8 may still fail semantically; smoke-test language output through the full chain. Use q_a BF16 patching only as an explicitly requested diagnostic A/B artifact, not as the default path.
+- Keep `--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching` in `VLLM_EXTRA_ARGS` for the corrected OPE-13 ROCm/ATOM FP8 GLM-5.1 launch. Only change this for an explicit runtime A/B test, and record whether the test changes async scheduling, prefix caching, CUDAGraph mode, or all three.
 - Do not use `--enforce-eager` for normal throughput unless a specific diagnostic requires it and the tradeoff is recorded.
 - `MAX_NUM_BATCHED_TOKENS` below live input length can fail or queue poorly for long-input short-output workloads.
 - Host reboot clears runtime containers/processes and possibly image cache; durable model/env files should remain under `REMOTE_ROOT` on `DATA_DISK`.

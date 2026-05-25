@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Patch GLM-5.1 FP8 block-128 weights by restoring selected tensors to BF16.
+"""Diagnostic patch for GLM-5.1 FP8 block-128 weights.
 
 Input is the ATOM-compatible FP8 block-128 model produced by
-quantize_glm51_fp8_block128.py. The output keeps the FP8 layout for most
-2D weights, replaces selected tensors from the BF16 merged source, removes
-their weight_scale_inv tensors, and marks those
-modules as not converted in config.json.
+quantize_glm51_fp8_block128.py. The normal deployment artifact should keep
+attention projections in FP8. This script is only for explicit diagnostics:
+it replaces selected tensors from the BF16 merged source, removes their
+weight_scale_inv tensors, and marks those modules as not converted in
+config.json.
 """
 
 from __future__ import annotations
@@ -19,10 +20,11 @@ from pathlib import Path
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-
 DEFAULT_FP8_SRC = "/data2/amd_profiling/models/glm51-sft_aug_v1_merged-fp8-block128"
 DEFAULT_BF16_SRC = "/data2/amd_profiling/models/glm51-sft_aug_v1_merged"
-DEFAULT_OUT = "/data2/amd_profiling/models/glm51-sft_aug_v1_merged-fp8-block128-qabf16"
+DEFAULT_OUT = (
+    "/data2/amd_profiling/models/glm51-sft_aug_v1_merged-fp8-block128-qabf16-diagnostic"
+)
 DEFAULT_TARGET_SUFFIXES = ("self_attn.q_a_proj.weight",)
 
 
@@ -128,12 +130,16 @@ def main() -> None:
     shards = sorted(set(fp8_map.values()))
 
     suffixes = target_suffixes(args)
-    targets = sorted(key for key in fp8_map if any(key.endswith(suffix) for suffix in suffixes))
+    targets = sorted(
+        key for key in fp8_map if any(key.endswith(suffix) for suffix in suffixes)
+    )
     if not targets:
         raise RuntimeError(f"No targets ending with {suffixes!r} found")
     missing = [key for key in targets if key not in bf16_map]
     if missing:
-        raise RuntimeError(f"{len(missing)} target tensors missing from BF16 source: {missing[:5]}")
+        raise RuntimeError(
+            f"{len(missing)} target tensors missing from BF16 source: {missing[:5]}"
+        )
 
     copy_side_files(fp8_src, out)
 
@@ -153,7 +159,9 @@ def main() -> None:
         for key in shard_targets:
             bf16_shard = bf16_map[key]
             if bf16_shard not in bf16_cache:
-                bf16_cache[bf16_shard] = load_file(str(bf16_src / bf16_shard), device="cpu")
+                bf16_cache[bf16_shard] = load_file(
+                    str(bf16_src / bf16_shard), device="cpu"
+                )
             tensors[key] = bf16_cache[bf16_shard][key]
             tensors.pop(key + "_scale_inv", None)
         tmp_path = out_path.with_name("." + out_path.name + ".tmp")
@@ -163,7 +171,14 @@ def main() -> None:
 
     total_size, weight_map = rebuild_index(out, shards)
     with open(out / "model.safetensors.index.json", "w", encoding="utf-8") as f:
-        json.dump({"metadata": {"total_size": total_size}, "weight_map": dict(sorted(weight_map.items()))}, f, indent=2)
+        json.dump(
+            {
+                "metadata": {"total_size": total_size},
+                "weight_map": dict(sorted(weight_map.items())),
+            },
+            f,
+            indent=2,
+        )
         f.write("\n")
 
     restored_modules = sorted(key[: -len(".weight")] for key in targets)
@@ -174,7 +189,9 @@ def main() -> None:
         "change": "restore selected weights to BF16 and remove corresponding weight_scale_inv tensors",
         "target_suffixes": list(suffixes),
         "restored": len(targets),
-        "q_a_proj_restored": sum(key.endswith("self_attn.q_a_proj.weight") for key in targets),
+        "q_a_proj_restored": sum(
+            key.endswith("self_attn.q_a_proj.weight") for key in targets
+        ),
         "affected_shards": len(targets_by_fp8_shard),
         "modules_to_not_convert_count": modules_count,
         "copy_mode": args.copy_mode,

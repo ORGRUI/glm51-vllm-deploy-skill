@@ -3,7 +3,7 @@
 
 The generic compressed-tensors FP8_DYNAMIC path produces per-channel
 `weight_scale` tensors and a `compressed-tensors` quantization config. ATOM's
-GLM-5 recipe expects the GLM-5-FP8 layout instead: `quant_method=fp8`,
+GLM-5 recipe expects the GLM-5.1-FP8 layout instead: `quant_method=fp8`,
 `weight_block_size=[128, 128]`, and per-block `weight_scale_inv` tensors.
 """
 
@@ -25,10 +25,9 @@ from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-
 DEFAULT_SRC = "/data2/amd_profiling/models/glm51-sft_aug_v1_merged"
 DEFAULT_OUT = "/data2/amd_profiling/models/glm51-sft_aug_v1_merged-fp8-block128"
-DEFAULT_FP8_REPO = "zai-org/GLM-5-FP8"
+DEFAULT_FP8_REPO = "zai-org/GLM-5.1-FP8"
 BLOCK = 128
 FP8_MAX = float(torch.finfo(torch.float8_e4m3fn).max)
 QUANTIZED_WEIGHT_PATTERNS = [
@@ -43,7 +42,9 @@ QUANTIZED_WEIGHT_PATTERNS = [
     re.compile(r"^model\.layers\.\d+\.mlp\.experts\.\d+\.up_proj\.weight$"),
     re.compile(r"^model\.layers\.\d+\.self_attn\.indexer\.wk\.weight$"),
     re.compile(r"^model\.layers\.\d+\.self_attn\.indexer\.wq_b\.weight$"),
+    re.compile(r"^model\.layers\.\d+\.self_attn\.q_a_proj\.weight$"),
     re.compile(r"^model\.layers\.\d+\.self_attn\.kv_b_proj\.weight$"),
+    re.compile(r"^model\.layers\.\d+\.self_attn\.kv_a_proj_with_mqa\.weight$"),
     re.compile(r"^model\.layers\.\d+\.self_attn\.o_proj\.weight$"),
     re.compile(r"^model\.layers\.\d+\.self_attn\.q_b_proj\.weight$"),
 ]
@@ -51,9 +52,8 @@ QUANTIZED_WEIGHT_PATTERNS = [
 
 def is_temp_model_artifact(path: Path) -> bool:
     name = path.name
-    return (
-        name.endswith(".safetensors.tmp")
-        and (name.startswith(".model-") or name.startswith("model-"))
+    return name.endswith(".safetensors.tmp") and (
+        name.startswith(".model-") or name.startswith("model-")
     )
 
 
@@ -77,7 +77,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-shards", type=int, default=None, help="Debug limit")
     parser.add_argument("--cache-dir", default="/data2/amd_profiling/hf-cache")
     parser.add_argument("--fp8-reference-repo", default=DEFAULT_FP8_REPO)
-    parser.add_argument("--device", default="cpu", help="Compute device, e.g. cpu or cuda:0 on ROCm PyTorch")
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Compute device, e.g. cpu or cuda:0 on ROCm PyTorch",
+    )
     parser.add_argument(
         "--devices",
         default=None,
@@ -111,7 +115,9 @@ def load_reference_quant_config(repo: str, cache_dir: str | None) -> dict:
     required = {"quant_method": "fp8", "weight_block_size": [BLOCK, BLOCK]}
     for key, expected in required.items():
         if quant.get(key) != expected:
-            raise RuntimeError(f"Unexpected reference quant config {key}={quant.get(key)!r}")
+            raise RuntimeError(
+                f"Unexpected reference quant config {key}={quant.get(key)!r}"
+            )
     return quant
 
 
@@ -132,7 +138,9 @@ def should_quantize_by_contract(name: str) -> bool:
     return any(pattern.match(name) for pattern in QUANTIZED_WEIGHT_PATTERNS)
 
 
-def is_quantizable_weight(name: str, tensor: torch.Tensor, ignore: Iterable[str]) -> bool:
+def is_quantizable_weight(
+    name: str, tensor: torch.Tensor, ignore: Iterable[str]
+) -> bool:
     if not name.endswith(".weight"):
         return False
     if not should_quantize_by_contract(name):
@@ -144,26 +152,36 @@ def is_quantizable_weight(name: str, tensor: torch.Tensor, ignore: Iterable[str]
     module = name[: -len(".weight")]
     if should_ignore_tensor(module, ignore) or should_ignore_tensor(name, ignore):
         return False
-    return tensor.shape[0] % BLOCK == 0 and tensor.shape[1] % BLOCK == 0
+    return True
 
 
-def quantize_block128(weight: torch.Tensor, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+def quantize_block128(
+    weight: torch.Tensor, device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
     if weight.ndim != 2:
         raise ValueError(f"expected 2D weight, got {tuple(weight.shape)}")
     out_dim, in_dim = weight.shape
-    if out_dim % BLOCK != 0 or in_dim % BLOCK != 0:
-        raise ValueError(f"weight shape {tuple(weight.shape)} is not block-{BLOCK} aligned")
-    weight = weight.to(device=device)
-    blocks = weight.float().reshape(out_dim // BLOCK, BLOCK, in_dim // BLOCK, BLOCK)
+    out_blocks = (out_dim + BLOCK - 1) // BLOCK
+    in_blocks = (in_dim + BLOCK - 1) // BLOCK
+    padded_out = out_blocks * BLOCK
+    padded_in = in_blocks * BLOCK
+    weight = weight.to(device=device).float()
+    if padded_out != out_dim or padded_in != in_dim:
+        padded = weight.new_zeros((padded_out, padded_in))
+        padded[:out_dim, :in_dim] = weight
+        weight = padded
+    blocks = weight.reshape(out_blocks, BLOCK, in_blocks, BLOCK)
     amax = blocks.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-8)
     scale = amax / FP8_MAX
     qweight = (blocks / scale).clamp(min=-FP8_MAX, max=FP8_MAX).to(torch.float8_e4m3fn)
-    qweight = qweight.reshape(out_dim, in_dim)
+    qweight = qweight.reshape(padded_out, padded_in)[:out_dim, :in_dim].contiguous()
     scale = scale.squeeze(3).squeeze(1).to(torch.float32).contiguous()
     return qweight.cpu(), scale.cpu()
 
 
-def process_shard_task(args: tuple[str, str, str, list[str], str]) -> tuple[str, int, dict[str, str], int]:
+def process_shard_task(
+    args: tuple[str, str, str, list[str], str],
+) -> tuple[str, int, dict[str, str], int]:
     shard_name, src_dir, out_dir, ignore, device = args
     in_path = Path(src_dir) / shard_name
     out_path = Path(out_dir) / shard_name
@@ -221,7 +239,9 @@ def attention_layer_ids(weight_map: dict[str, str]) -> list[int]:
     return sorted(layer_ids)
 
 
-def merge_modules_to_not_convert(quant_config: dict, weight_map: dict[str, str]) -> dict:
+def merge_modules_to_not_convert(
+    quant_config: dict, weight_map: dict[str, str]
+) -> dict:
     quant_config = dict(quant_config)
     modules = list(quant_config.get("modules_to_not_convert", []))
     seen = set(modules)
@@ -234,14 +254,15 @@ def merge_modules_to_not_convert(quant_config: dict, weight_map: dict[str, str])
     add("lm_head")
     for layer_idx in attention_layer_ids(weight_map):
         add(f"model.layers.{layer_idx}.self_attn.indexer.weights_proj")
-        add(f"model.layers.{layer_idx}.self_attn.q_a_proj")
-        add(f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa")
     quant_config["modules_to_not_convert"] = modules
     return quant_config
 
 
 def write_index(out: Path, total_size: int, weight_map: dict[str, str]) -> None:
-    index = {"metadata": {"total_size": total_size}, "weight_map": dict(sorted(weight_map.items()))}
+    index = {
+        "metadata": {"total_size": total_size},
+        "weight_map": dict(sorted(weight_map.items())),
+    }
     with open(out / "model.safetensors.index.json", "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2)
         f.write("\n")
@@ -255,10 +276,16 @@ def main() -> None:
     if args.workers is None:
         args.workers = len(devices) if devices != ["cpu"] else 4
     if len(devices) == 1 and devices[0] != "cpu" and args.workers != 1:
-        print(f"single GPU device {devices[0]} requested; forcing --workers 1 to avoid GPU memory contention", flush=True)
+        print(
+            f"single GPU device {devices[0]} requested; forcing --workers 1 to avoid GPU memory contention",
+            flush=True,
+        )
         args.workers = 1
     if len(devices) > 1 and args.workers > len(devices):
-        print(f"limiting workers from {args.workers} to device count {len(devices)}", flush=True)
+        print(
+            f"limiting workers from {args.workers} to device count {len(devices)}",
+            flush=True,
+        )
         args.workers = len(devices)
     src = Path(args.src)
     out = Path(args.out)
@@ -295,9 +322,13 @@ def main() -> None:
     weight_map: dict[str, str] = {}
     quantized_total = 0
     if jobs:
-        with ProcessPoolExecutor(max_workers=args.workers, mp_context=get_context("spawn")) as ex:
+        with ProcessPoolExecutor(
+            max_workers=args.workers, mp_context=get_context("spawn")
+        ) as ex:
             futures = {ex.submit(process_shard_task, job): job[0] for job in jobs}
-            for fut in tqdm.tqdm(as_completed(futures), total=len(futures), desc="Quantizing"):
+            for fut in tqdm.tqdm(
+                as_completed(futures), total=len(futures), desc="Quantizing"
+            ):
                 shard, shard_size, shard_map, quantized = fut.result()
                 total_size += shard_size
                 weight_map.update(shard_map)
