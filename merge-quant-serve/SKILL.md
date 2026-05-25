@@ -30,7 +30,7 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, and prefix caching.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
 
 ## One-Command Stages
 
@@ -100,6 +100,14 @@ After serving, require:
 curl -fsS "$PUBLIC_BASE_URL/models"
 curl -fsS -H 'Content-Type: application/json' "$PUBLIC_BASE_URL/chat/completions" \
   -d '{"model":"'"${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"'","messages":[{"role":"user","content":"请直接给最终答案，不要展示推理过程。问题：1+1等于几？"}],"max_tokens":64,"temperature":0}'
+```
+
+Minimal default rewrite check:
+
+```bash
+curl -fsS -H 'Content-Type: application/json' "$PUBLIC_BASE_URL/chat/completions" \
+  -d '{"model":"'"${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"'","messages":[{"role":"user","content":"请直接给最终答案。问题：1+1等于几？"}],"temperature":0}'
+tail -1 "$REMOTE_ROOT/request_captures/index.jsonl" | python3 -c 'import json,pathlib,sys; row=json.loads(sys.stdin.read()); body=json.loads(pathlib.Path(row["forwarded_body_path"]).read_text()); assert body["max_tokens"] == 8192; assert body["chat_template_kwargs"]["enable_thinking"] is False; print("proxy defaults ok")'
 ```
 
 Record launch truth in the env file, wrapper logs, and `*.server_argv.json`.

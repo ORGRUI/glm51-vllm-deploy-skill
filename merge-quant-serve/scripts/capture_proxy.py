@@ -80,11 +80,7 @@ def as_json_string(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def normalize_tool_call_arguments_in_json(value: Any) -> int:
-    if not isinstance(value, dict):
-        return 0
-
-    messages = value.get("messages")
+def normalize_tool_call_arguments_in_messages(messages: Any) -> int:
     if not isinstance(messages, list):
         return 0
 
@@ -107,6 +103,32 @@ def normalize_tool_call_arguments_in_json(value: Any) -> int:
             function["arguments"] = as_json_string(arguments)
             count += 1
     return count
+
+
+def normalize_tool_call_arguments_in_json(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+
+    count = 0
+    for field in ("messages", "prompt", "history"):
+        count += normalize_tool_call_arguments_in_messages(value.get(field))
+    return count
+
+
+def disable_thinking_in_chat_request(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+
+    chat_template_kwargs = value.get("chat_template_kwargs")
+    if chat_template_kwargs is None:
+        value["chat_template_kwargs"] = {"enable_thinking": False}
+        return True
+    if not isinstance(chat_template_kwargs, dict):
+        return False
+    if "enable_thinking" in chat_template_kwargs:
+        return False
+    chat_template_kwargs["enable_thinking"] = False
+    return True
 
 
 class ReplacementCharMasker:
@@ -218,6 +240,7 @@ def rewrite_request_body(
     default_max_tokens: Optional[int],
     mask_replacement_char: bool,
     normalize_tool_call_arguments: bool,
+    disable_thinking: bool,
 ) -> tuple[bytes, dict[str, Any]]:
     """Return the body sent upstream plus a short transform summary."""
     summary: dict[str, Any] = {
@@ -225,6 +248,7 @@ def rewrite_request_body(
         "default_max_tokens": default_max_tokens,
         "mask_replacement_char": mask_replacement_char,
         "normalize_tool_call_arguments": normalize_tool_call_arguments,
+        "disable_thinking": disable_thinking,
         "changed": False,
     }
     if (
@@ -232,6 +256,7 @@ def rewrite_request_body(
         and default_max_tokens is None
         and not mask_replacement_char
         and not normalize_tool_call_arguments
+        and not disable_thinking
     ):
         return body, summary
 
@@ -263,6 +288,17 @@ def rewrite_request_body(
         if normalized_tool_call_arguments:
             changed = True
             summary["normalized_tool_call_arguments"] = normalized_tool_call_arguments
+    if disable_thinking and request.path == "/v1/chat/completions":
+        previous_chat_template_kwargs = parsed.get("chat_template_kwargs")
+        disabled_thinking = disable_thinking_in_chat_request(parsed)
+        if disabled_thinking:
+            changed = True
+            summary.update(
+                {
+                    "previous_chat_template_kwargs": previous_chat_template_kwargs,
+                    "forwarded_enable_thinking": False,
+                }
+            )
     if force_temperature is not None:
         previous = parsed.get("temperature")
         parsed["temperature"] = force_temperature
@@ -422,6 +458,7 @@ async def make_app(
     default_max_tokens: Optional[int],
     mask_replacement_char: bool,
     normalize_tool_call_arguments: bool,
+    disable_thinking: bool,
 ) -> web.Application:
     timeout = ClientTimeout(total=None, sock_connect=30, sock_read=None)
     session = ClientSession(timeout=timeout)
@@ -440,6 +477,7 @@ async def make_app(
             default_max_tokens,
             mask_replacement_char,
             normalize_tool_call_arguments,
+            disable_thinking,
         )
         meta["request_transform"] = request_transform
         meta["upstream_request_bytes"] = len(upstream_body)
@@ -617,8 +655,9 @@ def main() -> None:
         dest="normalize_tool_call_arguments",
         action="store_true",
         help=(
-            "Convert historical message.tool_calls[*].function.arguments values "
-            "to JSON strings before forwarding to vLLM."
+            "Convert historical messages/prompt/history "
+            "tool_calls[*].function.arguments values to JSON strings before "
+            "forwarding to vLLM."
         ),
     )
     normalize_tool_call_group.add_argument(
@@ -632,6 +671,25 @@ def main() -> None:
             "CAPTURE_PROXY_NORMALIZE_TOOL_CALL_ARGUMENTS",
             True,
         )
+    )
+    thinking_group = parser.add_mutually_exclusive_group()
+    thinking_group.add_argument(
+        "--disable-thinking",
+        dest="disable_thinking",
+        action="store_true",
+        help=(
+            "Fill chat_template_kwargs.enable_thinking=false for chat requests "
+            "that omit an explicit value."
+        ),
+    )
+    thinking_group.add_argument(
+        "--no-disable-thinking",
+        dest="disable_thinking",
+        action="store_false",
+        help="Forward chat requests without adding a default enable_thinking value.",
+    )
+    parser.set_defaults(
+        disable_thinking=env_flag("CAPTURE_PROXY_DISABLE_THINKING", True)
     )
     args = parser.parse_args()
 
@@ -648,6 +706,7 @@ def main() -> None:
             args.default_max_tokens,
             args.mask_replacement_char,
             args.normalize_tool_call_arguments,
+            args.disable_thinking,
         )
     )
 
@@ -659,7 +718,8 @@ def main() -> None:
         f"capture_dir={capture_dir}, force_temperature={args.force_temperature}, "
         f"default_max_tokens={args.default_max_tokens}, "
         f"mask_replacement_char={args.mask_replacement_char}, "
-        f"normalize_tool_call_arguments={args.normalize_tool_call_arguments}",
+        f"normalize_tool_call_arguments={args.normalize_tool_call_arguments}, "
+        f"disable_thinking={args.disable_thinking}",
         flush=True,
     )
     web.run_app(app, host=args.host, port=args.port, loop=loop, handle_signals=False)

@@ -19,6 +19,7 @@ FORCE_TEMPERATURE="${CAPTURE_PROXY_FORCE_TEMPERATURE:-}"
 DEFAULT_MAX_TOKENS="${CAPTURE_PROXY_DEFAULT_MAX_TOKENS:-}"
 MASK_REPLACEMENT_CHAR="${CAPTURE_PROXY_MASK_REPLACEMENT_CHAR:-1}"
 NORMALIZE_TOOL_CALL_ARGUMENTS="${CAPTURE_PROXY_NORMALIZE_TOOL_CALL_ARGUMENTS:-1}"
+DISABLE_THINKING="${CAPTURE_PROXY_DISABLE_THINKING:-1}"
 CAPTURE_PROXY_PYTHON="${CAPTURE_PROXY_PYTHON:-${ROOT}/venv-merge/bin/python}"
 if [[ ! -x "${CAPTURE_PROXY_PYTHON}" ]]; then
   CAPTURE_PROXY_PYTHON="python3"
@@ -74,6 +75,14 @@ case "${NORMALIZE_TOOL_CALL_ARGUMENTS}" in
     cmd+=(--normalize-tool-call-arguments)
     ;;
 esac
+case "${DISABLE_THINKING}" in
+  0|false|False|FALSE|no|No|NO|off|Off|OFF)
+    cmd+=(--no-disable-thinking)
+    ;;
+  *)
+    cmd+=(--disable-thinking)
+    ;;
+esac
 
 nohup "${cmd[@]}" >"${log_file}" 2>&1 &
 
@@ -95,4 +104,5 @@ if [[ -n "${DEFAULT_MAX_TOKENS}" ]]; then
 fi
 echo "Mask replacement char: ${MASK_REPLACEMENT_CHAR}"
 echo "Normalize tool-call arguments: ${NORMALIZE_TOOL_CALL_ARGUMENTS}"
+echo "Disable thinking: ${DISABLE_THINKING}"
 echo "Log: ${log_file}"
