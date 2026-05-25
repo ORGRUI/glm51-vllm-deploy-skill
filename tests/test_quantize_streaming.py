@@ -30,6 +30,8 @@ def test_quantizable_weight_selection_respects_glm51_contract():
         "model.layers.0.self_attn.q_a_proj",
         "model.layers.0.self_attn.kv_a_proj_with_mqa",
         "model.layers.0.self_attn.indexer.weights_proj",
+        "model.layers.0.self_attn.indexer.wq_b",
+        "model.layers.0.self_attn.indexer.wk",
     ]
     fp8_shape = torch.zeros((128, 128), dtype=torch.bfloat16)
     bad_shape = torch.zeros((128, 64), dtype=torch.bfloat16)
@@ -64,6 +66,30 @@ def test_quantizable_weight_selection_respects_glm51_contract():
         modules_to_not_convert=skip,
         weight_block_size=(128, 128),
     )
+    assert not quantize.is_quantizable_glm51_weight(
+        "model.layers.0.self_attn.indexer.wq_b.weight",
+        tensor=fp8_shape,
+        modules_to_not_convert=skip,
+        weight_block_size=(128, 128),
+    )
+    assert not quantize.is_quantizable_glm51_weight(
+        "model.layers.0.self_attn.indexer.wk.weight",
+        tensor=fp8_shape,
+        modules_to_not_convert=skip,
+        weight_block_size=(128, 128),
+    )
+
+
+def test_fp8_skip_modules_cover_indexer_bf16_compatibility_layers():
+    config = PretrainedConfig(num_hidden_layers=2)
+
+    skip = quantize.build_fp32_skip_modules(config)
+
+    assert "model.layers.0.self_attn.indexer.weights_proj" in skip
+    assert "model.layers.0.self_attn.indexer.wq_b" in skip
+    assert "model.layers.0.self_attn.indexer.wk" in skip
+    assert "model.layers.1.self_attn.indexer.wq_b" in skip
+    assert "model.layers.1.self_attn.indexer.wk" in skip
 
 
 def test_streaming_export_writes_fp8_weights_scales_and_index(tmp_path):
@@ -80,6 +106,12 @@ def test_streaming_export_writes_fp8_weights_scales_and_index(tmp_path):
         "model.layers.0.self_attn.q_b_proj.weight": torch.arange(
             128 * 128, dtype=torch.float32
         ).reshape(128, 128),
+        "model.layers.0.self_attn.indexer.wq_b.weight": torch.ones(
+            (128, 128), dtype=torch.bfloat16
+        ),
+        "model.layers.0.self_attn.indexer.wk.weight": torch.ones(
+            (128, 128), dtype=torch.bfloat16
+        ),
         "model.layers.0.mlp.experts.0.down_proj.weight": torch.ones(
             (128, 128), dtype=torch.bfloat16
         ),
@@ -106,6 +138,8 @@ def test_streaming_export_writes_fp8_weights_scales_and_index(tmp_path):
             "model.layers.0.self_attn.q_a_proj",
             "model.layers.0.self_attn.kv_a_proj_with_mqa",
             "model.layers.0.self_attn.indexer.weights_proj",
+            "model.layers.0.self_attn.indexer.wq_b",
+            "model.layers.0.self_attn.indexer.wk",
         ]
     )
 
@@ -134,6 +168,8 @@ def test_streaming_export_writes_fp8_weights_scales_and_index(tmp_path):
     )
     assert "model.embed_tokens.weight_scale_inv" not in weight_map
     assert "model.layers.0.self_attn.q_a_proj.weight_scale_inv" not in weight_map
+    assert "model.layers.0.self_attn.indexer.wq_b.weight_scale_inv" not in weight_map
+    assert "model.layers.0.self_attn.indexer.wk.weight_scale_inv" not in weight_map
 
     with safe_open(
         str(export_dir / shard_name), framework="pt", device="cpu"
@@ -147,6 +183,14 @@ def test_streaming_export_writes_fp8_weights_scales_and_index(tmp_path):
         ).shape == (1, 1)
         assert (
             handle.get_tensor("model.layers.0.self_attn.q_a_proj.weight").dtype
+            == torch.bfloat16
+        )
+        assert (
+            handle.get_tensor("model.layers.0.self_attn.indexer.wq_b.weight").dtype
+            == torch.bfloat16
+        )
+        assert (
+            handle.get_tensor("model.layers.0.self_attn.indexer.wk.weight").dtype
             == torch.bfloat16
         )
 

@@ -82,6 +82,8 @@ If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the reso
 
 The default artifact is `${RUN_SLUG}-merged-fp8-finegrained-block128`. It follows the attachment flow semantics without constructing the full BF16 model in GPU memory: the quantizer streams source safetensors shards, writes block-128 FP8 e4m3 Linear weights plus `weight_scale_inv`, and leaves embeddings, norms, routers/gates, `lm_head`, q_a / kv_a compatibility modules, and indexer compatibility modules unconverted. Sparse MoE expert `gate_proj` / `up_proj` / `down_proj` weights are emitted with their scale tensors during the same streaming pass.
 
+Keep `self_attn.indexer.{wq_b,wk,weights_proj}.weight` in BF16 in this attachment-style path. If `indexer.wq_b` or `indexer.wk` is absent from `modules_to_not_convert`, ATOM/vLLM will allocate FP8 `weight_scale` parameters for those layers while the streamed checkpoint has no matching scale tensors, leaving the scale params at init values and causing load warnings such as `indexer.{wk,wq_b}.weight_scale` not loaded.
+
 Keep `self_attn.q_a_proj.weight` and `self_attn.kv_a_proj_with_mqa.weight` in BF16 in this attachment-style path. Expected representative unconverted shapes:
 
 ```text

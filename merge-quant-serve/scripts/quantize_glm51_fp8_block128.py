@@ -168,6 +168,11 @@ def build_fp32_skip_modules(config) -> list[str]:
             f"model.layers.{layer_idx}.self_attn.indexer.weights_proj"
             for layer_idx in layer_ids
         ],
+        *[
+            f"model.layers.{layer_idx}.self_attn.indexer.wq_b"
+            for layer_idx in layer_ids
+        ],
+        *[f"model.layers.{layer_idx}.self_attn.indexer.wk" for layer_idx in layer_ids],
         *[f"model.layers.{layer_idx}.self_attn.q_a_proj" for layer_idx in layer_ids],
         *[
             f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa"

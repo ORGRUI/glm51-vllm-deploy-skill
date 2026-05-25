@@ -11,6 +11,8 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+ROOT="${AMD_PROFILING_ROOT:-${ROOT}}"
+
 CADDY_IMAGE="${CADDY_IMAGE:-caddy:2-alpine}"
 CADDY_CONTAINER_NAME="${CADDY_CONTAINER_NAME:-amd-profiling-caddy}"
 CADDY_LISTEN="${CADDY_LISTEN:-:7777}"
