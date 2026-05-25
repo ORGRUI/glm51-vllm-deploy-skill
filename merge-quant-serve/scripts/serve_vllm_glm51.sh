@@ -33,7 +33,7 @@ TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
 SUDO_PASSWORD="${SUDO_PASSWORD:-}"
 # OPE-13 recovered official-partial service used this runtime path for the
 # 10k long Chinese/repeated-prefix validation.
-DEFAULT_VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching'
+DEFAULT_VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --no-enable-prefix-caching'
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-$DEFAULT_VLLM_EXTRA_ARGS}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-rocm}"
 VLLM_TRUST_REMOTE_CODE="${VLLM_TRUST_REMOTE_CODE:-1}"

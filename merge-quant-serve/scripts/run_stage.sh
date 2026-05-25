@@ -78,7 +78,7 @@ derive() {
   : "${MAX_NUM_SEQS:=2}"
   : "${MAX_NUM_BATCHED_TOKENS:=65536}"
   : "${GPU_MEMORY_UTILIZATION:=0.60}"
-  local default_vllm_extra_args='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching'
+  local default_vllm_extra_args='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --no-enable-prefix-caching'
   : "${VLLM_EXTRA_ARGS:=${default_vllm_extra_args}}"
   : "${FORCE_TEMPERATURE:=1}"
   : "${DEFAULT_MAX_TOKENS:=8192}"
