@@ -1,6 +1,6 @@
 ---
 name: merge-quant-serve
-description: Deploy a GLM-5.1 LoRA from a Tinker checkpoint URL or signed OSS archive by resolving the source, preparing PEFT, merging BF16 shards, quantizing corrected official-partial FP8 block-128, and serving through vLLM + ATOM with capture proxy and Caddy. Use when asked for merge/quant/serve, GLM-5.1 FP8 block-128 deployment, OPE-13 corrected official-partial quantization, or one-command staged deployment.
+description: Deploy a GLM-5.1 LoRA from a Tinker checkpoint URL or signed OSS archive by resolving the source, preparing PEFT, merging BF16 shards, quantizing with Transformers FineGrainedFP8 block-128 plus explicit MoE expert rewrite, and serving through vLLM + ATOM with capture proxy and Caddy. Use when asked for merge/quant/serve, GLM-5.1 FP8 block-128 deployment, OPE-13 attachment-style quantization, or one-command staged deployment.
 ---
 
 # Merge Quant Serve
@@ -30,7 +30,7 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching, merge untouched shards as symlinks, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
 
 ## One-Command Stages
 
@@ -70,10 +70,9 @@ If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the reso
 - `scripts/resolve_model_source.py`: validate `OSS_URL` or convert `TINKER_URL` to signed HTTP(S) archive.
 - `scripts/prepare_oss_lora_source.py`: download/extract archive and produce a PEFT adapter.
 - `scripts/prefetch_glm51_base.py`: prefetch GLM-5.1 base shards into local NVMe HF cache.
-- `scripts/merge_glm51_lora_sharded.py`: merge LoRA into BF16 model shards.
+- `scripts/merge_glm51_lora_sharded.py`: merge LoRA into BF16 model shards, expand sparse expert representatives, reconstruct lm_head shards when possible, and emit `merge_summary.json`.
 - `scripts/validate_and_repair_safetensors_shards.py`: validate merged shard integrity and repair dangling links.
-- `scripts/quantize_glm51_fp8_block128.py`: produce corrected official-partial FP8 block-128 artifact.
-- `scripts/patch_glm51_fp8_qabf16.py`: diagnostic-only q_a BF16 patch; do not use in the default path.
+- `scripts/quantize_glm51_fp8_block128.py`: produce attachment-style `FineGrainedFP8Config` block-128 artifact, then rewrite MoE expert shards with `weight_scale_inv`.
 - `scripts/serve_vllm_glm51.sh`: launch vLLM + ATOM backend.
 - `scripts/capture_proxy.py` and `scripts/serve_capture_proxy.sh`: OpenAI-compatible capture/rewrite proxy.
 - `scripts/serve_caddy_proxy.sh`: public `:7777` Caddy proxy.
@@ -81,16 +80,14 @@ If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the reso
 
 ## Quantization Contract
 
-The default artifact is `${RUN_SLUG}-merged-fp8-block128-official-partial`. It follows the official GLM-5.1 FP8 coverage: attention projection linears, MLP linears, and MoE expert linears are FP8 e4m3 block-128 with `weight_scale_inv`; embeddings, norms, routers/gates, `lm_head`, and indexer compatibility modules stay unconverted.
+The default artifact is `${RUN_SLUG}-merged-fp8-finegrained-block128`. It follows the attachment flow: Transformers `FineGrainedFP8Config` exports block-128 FP8, then sparse MoE expert `gate_proj` / `up_proj` / `down_proj` shards are rewritten explicitly with FP8 e4m3 weights and `weight_scale_inv`; embeddings, norms, routers/gates, `lm_head`, q_a / kv_a compatibility modules, and indexer compatibility modules stay unconverted.
 
-Keep `self_attn.q_a_proj.weight` and `self_attn.kv_a_proj_with_mqa.weight` in the FP8 contract. Expected representative shapes:
+Keep `self_attn.q_a_proj.weight` and `self_attn.kv_a_proj_with_mqa.weight` in BF16 in this attachment-style path. Expected representative unconverted shapes:
 
 ```text
-q_a_proj.weight              FP8 [2048, 6144], scale_inv [16, 48]
-kv_a_proj_with_mqa.weight    FP8 [576, 6144],  scale_inv [5, 48]
+q_a_proj.weight              BF16 [2048, 6144]
+kv_a_proj_with_mqa.weight    BF16 [576, 6144]
 ```
-
-The older `*-qabf16` artifact is diagnostic only and must not be the default deployment artifact.
 
 ## Runtime Checks
 

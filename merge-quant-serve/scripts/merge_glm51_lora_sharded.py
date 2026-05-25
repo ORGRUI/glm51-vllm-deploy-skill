@@ -62,9 +62,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--copy-untouched",
-        default="hardlink",
-        choices=["hardlink", "copy", "none"],
-        help="For shards without LoRA targets, hardlink/copy the base shard instead of loading and rewriting it",
+        default="symlink",
+        choices=["symlink", "hardlink", "copy", "none"],
+        help=(
+            "For shards without LoRA targets, symlink/hardlink/copy the base shard "
+            "instead of loading and rewriting it"
+        ),
     )
     return parser.parse_args()
 
@@ -592,18 +595,31 @@ def build_plan(
 def copy_repo_side_files(
     base_repo: str, adapter_repo: str, out_dir: Path, cache_dir: str | None
 ) -> None:
-    api = HfApi()
-    info = api.model_info(base_repo)
-    skip_suffixes = (".safetensors",)
-    skip_names = {"model.safetensors.index.json"}
-    for sibling in info.siblings:
-        name = sibling.rfilename
-        if name in skip_names or name.endswith(skip_suffixes):
-            continue
-        dest = out_dir / name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        src = hf_hub_download(base_repo, name, cache_dir=cache_dir)
-        shutil.copy2(src, dest)
+    base_path = local_source_path(base_repo)
+    if base_path is not None:
+        skip_names = {"model.safetensors.index.json"}
+        for src in base_path.rglob("*"):
+            rel = src.relative_to(base_path)
+            if src.is_dir():
+                continue
+            if rel.name.endswith(".safetensors") or str(rel) in skip_names:
+                continue
+            dest = out_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+    else:
+        api = HfApi()
+        info = api.model_info(base_repo)
+        skip_suffixes = (".safetensors",)
+        skip_names = {"model.safetensors.index.json"}
+        for sibling in info.siblings:
+            name = sibling.rfilename
+            if name in skip_names or name.endswith(skip_suffixes):
+                continue
+            dest = out_dir / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src = hf_hub_download(base_repo, name, cache_dir=cache_dir)
+            shutil.copy2(src, dest)
 
     adapter_files = ["adapter_config.json", "metadata.json", "training_meta.json"]
     for name in adapter_files:
@@ -621,8 +637,13 @@ def copy_untouched_shard(
 ) -> bool:
     if mode == "none":
         return False
-    if tmp_path.exists():
+    if tmp_path.exists() or tmp_path.is_symlink():
         tmp_path.unlink()
+    if mode == "symlink":
+        if out_path.exists() or out_path.is_symlink():
+            out_path.unlink()
+        out_path.symlink_to(base_path)
+        return True
     if mode == "hardlink":
         try:
             os.link(base_path, tmp_path)
@@ -645,15 +666,16 @@ def merge_shard(
     compute_dtype: torch.dtype,
     device: str,
     copy_untouched: str,
-) -> None:
+) -> int:
     out_path = out_dir / shard_name
     tmp_path = out_dir / f".{shard_name}.tmp"
-    base_path = hf_hub_download(base_repo, shard_name, cache_dir=cache_dir)
+    base_path = resolve_file(base_repo, shard_name, cache_dir)
     if not targets and copy_untouched_shard(
         base_path, out_path, tmp_path, copy_untouched
     ):
-        return
+        return 0
     tensors = load_file(base_path, device="cpu")
+    changed = 0
 
     for base_key, a_key, b_key in targets:
         if base_key not in tensors:
@@ -670,16 +692,18 @@ def merge_shard(
         merged = base.to(device=device, dtype=compute_dtype)
         merged.addmm_(b, a, beta=1.0, alpha=scale)
         tensors[base_key] = merged.to(device="cpu", dtype=base.dtype)
+        changed += 1
 
     save_file(tensors, str(tmp_path))
     os.replace(tmp_path, out_path)
+    return changed
 
 
 def merge_shard_task(
     args: tuple[
         str, str, list[tuple[str, str, str]], str, str | None, float, str, str, str
     ],
-) -> str:
+) -> tuple[str, int]:
     (
         base_repo,
         shard_name,
@@ -692,7 +716,7 @@ def merge_shard_task(
         copy_untouched,
     ) = args
     compute_dtype = torch.float32 if dtype_name == "float32" else torch.bfloat16
-    merge_shard(
+    changed = merge_shard(
         base_repo,
         shard_name,
         targets,
@@ -704,7 +728,7 @@ def merge_shard_task(
         device,
         copy_untouched,
     )
-    return shard_name
+    return shard_name, changed
 
 
 def main() -> None:
@@ -763,6 +787,7 @@ def main() -> None:
         targets = per_shard.get(shard_name, [])
         pending.append((i, shard_name, targets))
 
+    shard_summaries: list[dict] = []
     if jobs <= 1:
         for i, shard_name, targets in pending:
             device = devices[0]
@@ -770,7 +795,7 @@ def main() -> None:
                 f"[{i}/{len(all_shards)}] merge {shard_name} targets={len(targets)} device={device}",
                 flush=True,
             )
-            merge_shard(
+            changed = merge_shard(
                 args.base_repo,
                 shard_name,
                 targets,
@@ -782,6 +807,7 @@ def main() -> None:
                 device,
                 args.copy_untouched,
             )
+            shard_summaries.append({"shard": shard_name, "changed_params": changed})
     else:
         print(f"parallel jobs: {jobs} devices={','.join(devices)}", flush=True)
         task_args = [
@@ -815,13 +841,37 @@ def main() -> None:
             done = 0
             for future in as_completed(futures):
                 shard_name = futures[future]
-                future.result()
+                _, changed = future.result()
+                shard_summaries.append({"shard": shard_name, "changed_params": changed})
                 done += 1
                 print(f"done {done}/{len(futures)} {shard_name}", flush=True)
 
     manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(out_dir / "merge_manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
+        f.write("\n")
+    changed_shards = sorted(
+        item["shard"] for item in shard_summaries if item["changed_params"] > 0
+    )
+    unchanged_shards = sorted(set(all_shards) - set(changed_shards))
+    summary = {
+        "base_model_path": args.base_repo,
+        "lora_path": args.adapter_repo,
+        "output_path": str(out_dir),
+        "scaling": scale,
+        "mapped_param_count": adapter_plan["expand_stats"]["planned_pairs"],
+        "changed_shard_count": len(changed_shards),
+        "unchanged_shard_count": len(unchanged_shards),
+        "changed_shards": changed_shards,
+        "unchanged_shards": unchanged_shards,
+        "shards": sorted(shard_summaries, key=lambda item: item["shard"]),
+        "plan_stats": {
+            "routed_expert_expand": adapter_plan["expand_stats"],
+            "lm_head_reconstruction": adapter_plan["lm_head_reconstruction"],
+        },
+    }
+    with open(out_dir / "merge_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
         f.write("\n")
     print("merge complete", flush=True)
 
