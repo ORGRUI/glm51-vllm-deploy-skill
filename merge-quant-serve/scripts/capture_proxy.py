@@ -16,7 +16,6 @@ from typing import Any, Iterable, Optional
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -196,7 +195,9 @@ async def capture_request(
         },
     }
 
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     replay_path.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -282,7 +283,9 @@ def rewrite_request_body(
                 "forwarded_max_tokens": default_max_tokens,
             }
         )
-    rewritten = json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    rewritten = json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
     summary["changed"] = changed
     return rewritten, summary
 
@@ -407,7 +410,9 @@ class SseCapture:
 
 
 def write_json(path: Path, obj: Any) -> None:
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 async def make_app(
@@ -439,7 +444,9 @@ async def make_app(
         meta["request_transform"] = request_transform
         meta["upstream_request_bytes"] = len(upstream_body)
         if upstream_body != body:
-            forwarded_body_path = Path(str(meta["body_path"])).with_suffix(".forwarded.json")
+            forwarded_body_path = Path(str(meta["body_path"])).with_suffix(
+                ".forwarded.json"
+            )
             forwarded_body_path.write_bytes(upstream_body)
             meta["forwarded_body_path"] = str(forwarded_body_path)
         else:
@@ -488,7 +495,9 @@ async def make_app(
             response_masker = ReplacementCharMasker() if mask_replacement_char else None
             with response_body_path.open("wb") as response_file:
                 async for chunk in upstream_resp.content.iter_chunked(65536):
-                    out_chunk = response_masker.feed(chunk) if response_masker else chunk
+                    out_chunk = (
+                        response_masker.feed(chunk) if response_masker else chunk
+                    )
                     if not out_chunk:
                         continue
                     bytes_out += len(out_chunk)
@@ -527,7 +536,9 @@ async def make_app(
             **sse_capture.summary(),
         }
         if mask_replacement_char and response_masker:
-            response_summary["masked_replacement_chars_in_response"] = response_masker.count
+            response_summary["masked_replacement_chars_in_response"] = (
+                response_masker.count
+            )
         meta.update(response_summary)
         write_json(Path(str(meta["meta_path"])), meta)
         write_json(Path(str(meta["response_summary_path"])), response_summary)
@@ -550,8 +561,13 @@ async def make_app(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.getenv("CAPTURE_PROXY_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("CAPTURE_PROXY_PORT", "18080")))
-    parser.add_argument("--upstream", default=os.getenv("CAPTURE_PROXY_UPSTREAM", "http://127.0.0.1:7778"))
+    parser.add_argument(
+        "--port", type=int, default=int(os.getenv("CAPTURE_PROXY_PORT", "18080"))
+    )
+    parser.add_argument(
+        "--upstream",
+        default=os.getenv("CAPTURE_PROXY_UPSTREAM", "http://127.0.0.1:7778"),
+    )
     parser.add_argument(
         "--capture-dir",
         default=os.getenv(

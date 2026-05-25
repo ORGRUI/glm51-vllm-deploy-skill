@@ -20,20 +20,39 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-
 IGNORED_UNWRAP_NAMES = {".DS_Store", "__MACOSX"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url", required=True, help="Signed or public HTTP(S) OSS archive URL")
-    parser.add_argument("--work-dir", required=True, help="Work directory for the downloaded archive")
-    parser.add_argument("--base-repo", required=True, help="Base model repo/name used to build a Tinker adapter")
+    parser.add_argument(
+        "--url", required=True, help="Signed or public HTTP(S) OSS archive URL"
+    )
+    parser.add_argument(
+        "--work-dir", required=True, help="Work directory for the downloaded archive"
+    )
+    parser.add_argument(
+        "--base-repo",
+        required=True,
+        help="Base model repo/name used to build a Tinker adapter",
+    )
     parser.add_argument("--out", required=True, help="Output PEFT adapter directory")
     parser.add_argument("--sha256", default="", help="Optional expected archive SHA256")
-    parser.add_argument("--force-download", action="store_true", help="Redownload even if the archive exists")
-    parser.add_argument("--force-extract", action="store_true", help="Re-extract even if the extraction directory exists")
-    parser.add_argument("--download-only", action="store_true", help="Only download and verify the archive, then print its path")
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Redownload even if the archive exists",
+    )
+    parser.add_argument(
+        "--force-extract",
+        action="store_true",
+        help="Re-extract even if the extraction directory exists",
+    )
+    parser.add_argument(
+        "--download-only",
+        action="store_true",
+        help="Only download and verify the archive, then print its path",
+    )
     parser.add_argument(
         "--extract-workers",
         type=int,
@@ -71,7 +90,9 @@ def download(url: str, archive_path: Path, force: bool) -> None:
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = archive_path.with_suffix(archive_path.suffix + ".tmp")
-    request = urllib.request.Request(url, headers={"User-Agent": "glm51-oss-lora-prepare/1.0"})
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "glm51-oss-lora-prepare/1.0"}
+    )
     log(f"downloading OSS archive to {archive_path}")
     with urllib.request.urlopen(request) as response, open(tmp_path, "wb") as out:
         shutil.copyfileobj(response, out, length=16 * 1024 * 1024)
@@ -91,14 +112,19 @@ def verify_sha256(path: Path, expected: str) -> None:
         return
     actual = sha256_file(path)
     if actual.lower() != expected.lower():
-        raise ValueError(f"SHA256 mismatch for {path}: expected {expected}, got {actual}")
+        raise ValueError(
+            f"SHA256 mismatch for {path}: expected {expected}, got {actual}"
+        )
     log(f"sha256 ok: {actual}")
 
 
 def ensure_within_directory(root: Path, target: Path) -> None:
     root_resolved = root.resolve()
     target_resolved = target.resolve()
-    if root_resolved != target_resolved and root_resolved not in target_resolved.parents:
+    if (
+        root_resolved != target_resolved
+        and root_resolved not in target_resolved.parents
+    ):
         raise ValueError(f"archive member escapes extraction directory: {target}")
 
 
@@ -156,7 +182,9 @@ def safe_extract_zip(archive_path: Path, extract_dir: Path) -> None:
         zf.extractall(extract_dir)
 
 
-def extract_archive(archive_path: Path, extract_dir: Path, force: bool, workers: int) -> None:
+def extract_archive(
+    archive_path: Path, extract_dir: Path, force: bool, workers: int
+) -> None:
     if extract_dir.exists() and any(extract_dir.iterdir()) and not force:
         log(f"using existing extraction: {extract_dir}")
         return
@@ -181,7 +209,9 @@ def validate_peft_dir(path: Path) -> None:
     config = path / "adapter_config.json"
     weights = path / "adapter_model.safetensors"
     if not config.exists() or not weights.exists():
-        raise FileNotFoundError(f"{path} must contain adapter_config.json and adapter_model.safetensors")
+        raise FileNotFoundError(
+            f"{path} must contain adapter_config.json and adapter_model.safetensors"
+        )
     with open(config, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     for key in ("r", "lora_alpha"):
@@ -190,7 +220,9 @@ def validate_peft_dir(path: Path) -> None:
 
 
 def is_peft_dir(path: Path) -> bool:
-    return (path / "adapter_config.json").is_file() and (path / "adapter_model.safetensors").is_file()
+    return (path / "adapter_config.json").is_file() and (
+        path / "adapter_model.safetensors"
+    ).is_file()
 
 
 def find_peft_dir(root: Path) -> Path | None:
@@ -222,7 +254,9 @@ def prepare_output_dir(out: Path) -> bool:
         validate_peft_dir(out)
         return True
     if out.exists() and any(out.iterdir()):
-        raise FileExistsError(f"{out} exists but is not a complete PEFT adapter directory")
+        raise FileExistsError(
+            f"{out} exists but is not a complete PEFT adapter directory"
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
     return False
 
@@ -249,7 +283,9 @@ def build_from_tinker_raw(raw_path: Path, base_repo: str, out: Path) -> Path:
 
     if prepare_output_dir(out):
         return out
-    weights.build_lora_adapter(base_model=base_repo, adapter_path=str(raw_path), output_path=str(out))
+    weights.build_lora_adapter(
+        base_model=base_repo, adapter_path=str(raw_path), output_path=str(out)
+    )
     validate_peft_dir(out)
     return out
 

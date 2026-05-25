@@ -18,7 +18,6 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-
 TERMINAL_SUCCESS = {"succeeded", "completed"}
 TERMINAL_FAILURE = {"failed", "error", "cancelled", "canceled"}
 
@@ -27,12 +26,28 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--oss-url", default=os.getenv("OSS_URL", ""))
     parser.add_argument("--tinker-url", default=os.getenv("TINKER_URL", ""))
-    parser.add_argument("--gpu-lease-base-url", default=os.getenv("GPU_LEASE_BASE_URL", ""))
-    parser.add_argument("--gpu-lease-api-key", default=os.getenv("GPU_LEASE_API_KEY", ""))
-    parser.add_argument("--transfer-jobs-endpoint", default=os.getenv("TRANSFER_JOBS_ENDPOINT", ""))
-    parser.add_argument("--poll-interval", type=float, default=float(os.getenv("TRANSFER_POLL_INTERVAL", "30")))
-    parser.add_argument("--timeout", type=float, default=float(os.getenv("TRANSFER_TIMEOUT_SECONDS", "7200")))
-    parser.add_argument("--output-json", default=os.getenv("MODEL_SOURCE_RESOLUTION_JSON", ""))
+    parser.add_argument(
+        "--gpu-lease-base-url", default=os.getenv("GPU_LEASE_BASE_URL", "")
+    )
+    parser.add_argument(
+        "--gpu-lease-api-key", default=os.getenv("GPU_LEASE_API_KEY", "")
+    )
+    parser.add_argument(
+        "--transfer-jobs-endpoint", default=os.getenv("TRANSFER_JOBS_ENDPOINT", "")
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=float(os.getenv("TRANSFER_POLL_INTERVAL", "30")),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("TRANSFER_TIMEOUT_SECONDS", "7200")),
+    )
+    parser.add_argument(
+        "--output-json", default=os.getenv("MODEL_SOURCE_RESOLUTION_JSON", "")
+    )
     return parser.parse_args()
 
 
@@ -50,20 +65,26 @@ def http_request_json(
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         request_headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+    request = urllib.request.Request(
+        url, data=body, headers=request_headers, method=method
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace").strip() or exc.reason
-        raise RuntimeError(f"{method} {url} returned HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(
+            f"{method} {url} returned HTTP {exc.code}: {detail}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"{method} {url} failed: {exc.reason}") from exc
 
     try:
         parsed = json.loads(raw) if raw else {}
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{method} {url} returned non-JSON response: {raw[:500]!r}") from exc
+        raise RuntimeError(
+            f"{method} {url} returned non-JSON response: {raw[:500]!r}"
+        ) from exc
     if not isinstance(parsed, dict):
         raise RuntimeError(f"{method} {url} returned a non-object JSON response")
     return parsed
@@ -124,13 +145,21 @@ def endpoint_join(base: str, suffix: str) -> str:
     return f"{base.rstrip('/')}/{suffix.lstrip('/')}"
 
 
-def create_transfer_job(args: argparse.Namespace, tinker_url: str) -> tuple[dict[str, Any], str, dict[str, str]]:
+def create_transfer_job(
+    args: argparse.Namespace, tinker_url: str
+) -> tuple[dict[str, Any], str, dict[str, str]]:
     if args.gpu_lease_base_url:
         if not args.gpu_lease_api_key:
-            raise ValueError("GPU_LEASE_API_KEY is required when GPU_LEASE_BASE_URL is used")
+            raise ValueError(
+                "GPU_LEASE_API_KEY is required when GPU_LEASE_BASE_URL is used"
+            )
         url = endpoint_join(args.gpu_lease_base_url, "/api/transfer/jobs")
         headers = api_headers(args.gpu_lease_api_key)
-        return http_request_json(url, "POST", {"model_url": tinker_url}, headers), url, headers
+        return (
+            http_request_json(url, "POST", {"model_url": tinker_url}, headers),
+            url,
+            headers,
+        )
 
     if args.transfer_jobs_endpoint:
         url = args.transfer_jobs_endpoint.rstrip("/")
@@ -142,14 +171,21 @@ def create_transfer_job(args: argparse.Namespace, tinker_url: str) -> tuple[dict
     )
 
 
-def job_status_url(create_payload: dict[str, Any], create_url: str, headers: dict[str, str]) -> tuple[str, dict[str, str]]:
+def job_status_url(
+    create_payload: dict[str, Any], create_url: str, headers: dict[str, str]
+) -> tuple[str, dict[str, str]]:
     job_id = str(create_payload.get("job_id") or "").strip()
     if not job_id:
-        raise RuntimeError(f"transfer job create response did not include job_id: {create_payload}")
+        raise RuntimeError(
+            f"transfer job create response did not include job_id: {create_payload}"
+        )
 
     parsed_create = urllib.parse.urlparse(create_url)
     if parsed_create.path.rstrip("/").endswith("/api/transfer/jobs"):
-        return f"{create_url.rstrip('/')}/{urllib.parse.quote(job_id, safe='')}", headers
+        return (
+            f"{create_url.rstrip('/')}/{urllib.parse.quote(job_id, safe='')}",
+            headers,
+        )
 
     status_url = str(create_payload.get("status_url") or "").strip()
     if status_url:
@@ -166,7 +202,9 @@ def job_status_url(create_payload: dict[str, Any], create_url: str, headers: dic
     return f"{create_url.rstrip('/')}/{urllib.parse.quote(job_id, safe='')}", headers
 
 
-def poll_transfer_job(status_url: str, headers: dict[str, str], interval: float, timeout: float) -> dict[str, Any]:
+def poll_transfer_job(
+    status_url: str, headers: dict[str, str], interval: float, timeout: float
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last: dict[str, Any] = {}
     while True:
@@ -174,13 +212,21 @@ def poll_transfer_job(status_url: str, headers: dict[str, str], interval: float,
         status = str(last.get("status") or "").lower()
         stage = last.get("stage")
         error = last.get("error")
-        print(f"transfer status={status or '-'} stage={stage or '-'} error={error or '-'}", file=sys.stderr, flush=True)
+        print(
+            f"transfer status={status or '-'} stage={stage or '-'} error={error or '-'}",
+            file=sys.stderr,
+            flush=True,
+        )
         if status in TERMINAL_SUCCESS:
             return last
         if status in TERMINAL_FAILURE:
-            raise RuntimeError(f"transfer job failed: {json.dumps(last, ensure_ascii=False)[:2000]}")
+            raise RuntimeError(
+                f"transfer job failed: {json.dumps(last, ensure_ascii=False)[:2000]}"
+            )
         if time.monotonic() >= deadline:
-            raise TimeoutError(f"timed out waiting for transfer job: {json.dumps(last, ensure_ascii=False)[:2000]}")
+            raise TimeoutError(
+                f"timed out waiting for transfer job: {json.dumps(last, ensure_ascii=False)[:2000]}"
+            )
         time.sleep(interval)
 
 
@@ -211,8 +257,12 @@ def main() -> None:
 
     create_payload, create_url, headers = create_transfer_job(args, tinker_url)
     status_url, status_headers = job_status_url(create_payload, create_url, headers)
-    final_payload = poll_transfer_job(status_url, status_headers, args.poll_interval, args.timeout)
-    resolved = find_url_with_scheme(final_payload.get("result", final_payload), ("http://", "https://"))
+    final_payload = poll_transfer_job(
+        status_url, status_headers, args.poll_interval, args.timeout
+    )
+    resolved = find_url_with_scheme(
+        final_payload.get("result", final_payload), ("http://", "https://")
+    )
     if not resolved:
         raise SystemExit(
             "transfer job succeeded but did not return an HTTP(S) OSS archive URL: "

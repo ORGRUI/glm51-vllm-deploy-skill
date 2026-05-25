@@ -24,9 +24,8 @@ def parse_args() -> argparse.Namespace:
 
 def is_temp_model_artifact(path: Path) -> bool:
     name = path.name
-    return (
-        name.endswith(".safetensors.tmp")
-        and (name.startswith(".model-") or name.startswith("model-"))
+    return name.endswith(".safetensors.tmp") and (
+        name.startswith(".model-") or name.startswith("model-")
     )
 
 
@@ -89,7 +88,9 @@ def main() -> int:
     args = parse_args()
     model = Path(args.model)
     cache_dir = Path(args.cache_dir)
-    removed_temp = cleanup_temp_model_artifacts(model) if args.remove_temp_artifacts else []
+    removed_temp = (
+        cleanup_temp_model_artifacts(model) if args.remove_temp_artifacts else []
+    )
     shards = sorted(model.glob("model-*.safetensors"))
     repaired: list[dict[str, str]] = []
     bad: list[dict[str, str]] = []

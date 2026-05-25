@@ -35,7 +35,9 @@ def main() -> None:
     workers = max(1, args.workers)
     Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
 
-    index_path = download_one(args.base_repo, "model.safetensors.index.json", args.cache_dir)
+    index_path = download_one(
+        args.base_repo, "model.safetensors.index.json", args.cache_dir
+    )
     with open(index_path, "r", encoding="utf-8") as f:
         index = json.load(f)
 
@@ -49,12 +51,16 @@ def main() -> None:
                 filenames.add(name)
 
     filenames = sorted(filenames)
-    log(f"prefetching {len(filenames)} files from {args.base_repo} with {workers} workers")
+    log(
+        f"prefetching {len(filenames)} files from {args.base_repo} with {workers} workers"
+    )
 
     completed = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(download_one, args.base_repo, filename, args.cache_dir): filename
+            executor.submit(
+                download_one, args.base_repo, filename, args.cache_dir
+            ): filename
             for filename in filenames
         }
         for future in as_completed(futures):

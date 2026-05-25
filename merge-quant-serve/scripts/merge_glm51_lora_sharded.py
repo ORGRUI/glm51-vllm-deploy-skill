@@ -23,7 +23,6 @@ import torch
 from huggingface_hub import HfApi, hf_hub_download
 from safetensors.torch import load_file, save_file
 
-
 DEFAULT_BASE_REPO = "zai-org/GLM-5.1"
 DEFAULT_ADAPTER_REPO = (
     "mindlab-research/"
@@ -41,13 +40,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-repo", default=DEFAULT_BASE_REPO)
     parser.add_argument("--adapter-repo", default=DEFAULT_ADAPTER_REPO)
-    parser.add_argument("--out", required=True, help="Output directory for merged model")
+    parser.add_argument(
+        "--out", required=True, help="Output directory for merged model"
+    )
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--max-shards", type=int, default=None, help="Debug limit")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"])
-    parser.add_argument("--jobs", type=int, default=1, help="Number of shard merge workers")
-    parser.add_argument("--device", default="cpu", help="Compute device, e.g. cpu or cuda:0 on ROCm PyTorch")
+    parser.add_argument(
+        "--jobs", type=int, default=1, help="Number of shard merge workers"
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Compute device, e.g. cpu or cuda:0 on ROCm PyTorch",
+    )
     parser.add_argument(
         "--devices",
         default=None,
@@ -126,7 +133,9 @@ def load_json(repo: str, filename: str, cache_dir: str | None) -> dict:
         return json.load(f)
 
 
-def tensor_shape(repo: str, weight_map: dict[str, str], key: str, cache_dir: str | None) -> tuple[int, ...]:
+def tensor_shape(
+    repo: str, weight_map: dict[str, str], key: str, cache_dir: str | None
+) -> tuple[int, ...]:
     from safetensors import safe_open
 
     path = resolve_file(repo, weight_map[key], cache_dir)
@@ -154,10 +163,14 @@ def tp_adapter_files(adapter_path: Path) -> dict[int, Path]:
 def load_adapter_state(path: Path) -> dict:
     data = torch.load(path, map_location="cpu")
     if not isinstance(data, dict):
-        raise RuntimeError(f"bad adapter checkpoint payload in {path}: {type(data).__name__}")
+        raise RuntimeError(
+            f"bad adapter checkpoint payload in {path}: {type(data).__name__}"
+        )
     state = data.get("adapter_state_dict", data)
     if not isinstance(state, dict):
-        raise RuntimeError(f"bad adapter_state_dict payload in {path}: {type(state).__name__}")
+        raise RuntimeError(
+            f"bad adapter_state_dict payload in {path}: {type(state).__name__}"
+        )
     return state
 
 
@@ -179,7 +192,9 @@ def reconstruct_lm_head_b(
         if tensor is None:
             return None
         if tensor.ndim != 2 or tensor.shape[1] < rank:
-            raise RuntimeError(f"bad lm_head shard shape in {files[tp_rank]}: {tuple(tensor.shape)}")
+            raise RuntimeError(
+                f"bad lm_head shard shape in {files[tp_rank]}: {tuple(tensor.shape)}"
+            )
         parts.append(tensor[:, :rank].contiguous())
 
     full = torch.cat(parts, dim=0)
@@ -189,7 +204,9 @@ def reconstruct_lm_head_b(
             f"expected={(expected_rows, original_b.shape[1])}"
         )
     if not torch.equal(full[: original_b.shape[0]].to(original_b.dtype), original_b):
-        max_diff = float((full[: original_b.shape[0]].float() - original_b.float()).abs().max())
+        max_diff = float(
+            (full[: original_b.shape[0]].float() - original_b.float()).abs().max()
+        )
         raise RuntimeError(f"rank0 lm_head LoRA-B shard mismatch; max_diff={max_diff}")
     return full.to(dtype=original_b.dtype)
 
@@ -236,10 +253,18 @@ def reconstruct_lm_head_pair(
             f"expected={(expected_rows, rank)}"
         )
     if not torch.equal(full_a[: original_a.shape[0]].to(original_a.dtype), original_a):
-        max_diff = float((full_a[: original_a.shape[0]].float() - original_a.float()).abs().max())
+        max_diff = float(
+            (full_a[: original_a.shape[0]].float() - original_a.float()).abs().max()
+        )
         raise RuntimeError(f"rank0 lm_head LoRA-A shard mismatch; max_diff={max_diff}")
-    if not torch.equal(full_b[: original_b.shape[0]].to(original_b.dtype), original_b[:, :rank]):
-        max_diff = float((full_b[: original_b.shape[0]].float() - original_b[:, :rank].float()).abs().max())
+    if not torch.equal(
+        full_b[: original_b.shape[0]].to(original_b.dtype), original_b[:, :rank]
+    ):
+        max_diff = float(
+            (full_b[: original_b.shape[0]].float() - original_b[:, :rank].float())
+            .abs()
+            .max()
+        )
         raise RuntimeError(f"rank0 lm_head LoRA-B shard mismatch; max_diff={max_diff}")
     return full_a.to(dtype=original_a.dtype), full_b.to(dtype=original_b.dtype)
 
@@ -351,7 +376,9 @@ def format_expert_ids(ids: set[int], limit: int = 24) -> str:
     return rendered
 
 
-def collect_base_expert_ids(weight_map: dict[str, str]) -> dict[tuple[str, str], set[int]]:
+def collect_base_expert_ids(
+    weight_map: dict[str, str],
+) -> dict[tuple[str, str], set[int]]:
     groups: dict[tuple[str, str], set[int]] = defaultdict(set)
     for base_key in weight_map:
         parts = routed_expert_parts(base_key)
@@ -377,7 +404,9 @@ def expand_sparse_expert_targets(
     """
 
     base_expert_ids = collect_base_expert_ids(weight_map)
-    lora_by_group: dict[tuple[str, str], dict[int, tuple[str, str, str]]] = defaultdict(dict)
+    lora_by_group: dict[tuple[str, str], dict[int, tuple[str, str, str]]] = defaultdict(
+        dict
+    )
     non_expert_pairs: list[tuple[str, str, str]] = []
 
     for base_key, a_key, b_key in raw_pairs:
@@ -402,7 +431,9 @@ def expand_sparse_expert_targets(
         adapter_ids = set(lora_items)
         available_base_ids = base_expert_ids.get(group_key, set())
         if not available_base_ids:
-            errors.append(f"{prefix}*{suffix}: no matching routed experts in base index")
+            errors.append(
+                f"{prefix}*{suffix}: no matching routed experts in base index"
+            )
             continue
 
         full_ids = set(range(min(available_base_ids), max(available_base_ids) + 1))
@@ -420,7 +451,9 @@ def expand_sparse_expert_targets(
         }
         if adapter_ids == available_base_ids:
             full_groups += 1
-            expanded_pairs.extend(lora_items[expert_id] for expert_id in sorted(adapter_ids))
+            expanded_pairs.extend(
+                lora_items[expert_id] for expert_id in sorted(adapter_ids)
+            )
             continue
 
         if adapter_ids != representative_ids:
@@ -438,7 +471,10 @@ def expand_sparse_expert_targets(
             for offset in range(SPARSE_EXPERT_GROUP_SIZE):
                 expert_id = representative_id + offset
                 expanded_base_key = f"{prefix}{expert_id}{suffix}"
-                if expert_id not in available_base_ids or expanded_base_key not in weight_map:
+                if (
+                    expert_id not in available_base_ids
+                    or expanded_base_key not in weight_map
+                ):
                     errors.append(
                         f"{prefix}{representative_id}{suffix}: cannot expand to missing "
                         f"base expert {expanded_base_key}"
@@ -465,7 +501,9 @@ def expand_sparse_expert_targets(
     return expanded_pairs, stats
 
 
-def build_plan(base_repo: str, adapter_repo: str, cache_dir: str | None) -> tuple[dict, dict, float]:
+def build_plan(
+    base_repo: str, adapter_repo: str, cache_dir: str | None
+) -> tuple[dict, dict, float]:
     base_index = load_json(base_repo, "model.safetensors.index.json", cache_dir)
     adapter_config = load_json(adapter_repo, "adapter_config.json", cache_dir)
     rank = int(adapter_config["r"])
@@ -506,7 +544,9 @@ def build_plan(base_repo: str, adapter_repo: str, cache_dir: str | None) -> tupl
 
     if missing:
         msg = "\n".join(f"{k}: {reason}" for k, reason in missing[:50])
-        raise RuntimeError(f"{len(missing)} adapter tensors could not be planned:\n{msg}")
+        raise RuntimeError(
+            f"{len(missing)} adapter tensors could not be planned:\n{msg}"
+        )
 
     expanded_pairs, expand_stats = expand_sparse_expert_targets(raw_pairs, weight_map)
 
@@ -532,7 +572,10 @@ def build_plan(base_repo: str, adapter_repo: str, cache_dir: str | None) -> tupl
         f"expanded_targets={expand_stats['routed_expert_expanded_targets']}",
         flush=True,
     )
-    print(f"touched shards: {len(per_shard)} / {len(set(weight_map.values()))}", flush=True)
+    print(
+        f"touched shards: {len(per_shard)} / {len(set(weight_map.values()))}",
+        flush=True,
+    )
     print(f"lora scale: {scale}", flush=True)
     return (
         base_index,
@@ -546,7 +589,9 @@ def build_plan(base_repo: str, adapter_repo: str, cache_dir: str | None) -> tupl
     )
 
 
-def copy_repo_side_files(base_repo: str, adapter_repo: str, out_dir: Path, cache_dir: str | None) -> None:
+def copy_repo_side_files(
+    base_repo: str, adapter_repo: str, out_dir: Path, cache_dir: str | None
+) -> None:
     api = HfApi()
     info = api.model_info(base_repo)
     skip_suffixes = (".safetensors",)
@@ -571,7 +616,9 @@ def copy_repo_side_files(base_repo: str, adapter_repo: str, out_dir: Path, cache
         shutil.copy2(src, dest)
 
 
-def copy_untouched_shard(base_path: str, out_path: Path, tmp_path: Path, mode: str) -> bool:
+def copy_untouched_shard(
+    base_path: str, out_path: Path, tmp_path: Path, mode: str
+) -> bool:
     if mode == "none":
         return False
     if tmp_path.exists():
@@ -602,7 +649,9 @@ def merge_shard(
     out_path = out_dir / shard_name
     tmp_path = out_dir / f".{shard_name}.tmp"
     base_path = hf_hub_download(base_repo, shard_name, cache_dir=cache_dir)
-    if not targets and copy_untouched_shard(base_path, out_path, tmp_path, copy_untouched):
+    if not targets and copy_untouched_shard(
+        base_path, out_path, tmp_path, copy_untouched
+    ):
         return
     tensors = load_file(base_path, device="cpu")
 
@@ -626,8 +675,22 @@ def merge_shard(
     os.replace(tmp_path, out_path)
 
 
-def merge_shard_task(args: tuple[str, str, list[tuple[str, str, str]], str, str | None, float, str, str, str]) -> str:
-    base_repo, shard_name, targets, out_dir, cache_dir, scale, dtype_name, device, copy_untouched = args
+def merge_shard_task(
+    args: tuple[
+        str, str, list[tuple[str, str, str]], str, str | None, float, str, str, str
+    ],
+) -> str:
+    (
+        base_repo,
+        shard_name,
+        targets,
+        out_dir,
+        cache_dir,
+        scale,
+        dtype_name,
+        device,
+        copy_untouched,
+    ) = args
     compute_dtype = torch.float32 if dtype_name == "float32" else torch.bfloat16
     merge_shard(
         base_repo,
@@ -657,7 +720,9 @@ def main() -> None:
     compute_dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
     devices = parse_devices(args.device, args.devices)
     jobs = effective_jobs(args.jobs, devices)
-    base_index, adapter_plan, scale = build_plan(args.base_repo, args.adapter_repo, args.cache_dir)
+    base_index, adapter_plan, scale = build_plan(
+        args.base_repo, args.adapter_repo, args.cache_dir
+    )
     if args.validate_only:
         print("validation ok", flush=True)
         return
@@ -701,7 +766,10 @@ def main() -> None:
     if jobs <= 1:
         for i, shard_name, targets in pending:
             device = devices[0]
-            print(f"[{i}/{len(all_shards)}] merge {shard_name} targets={len(targets)} device={device}", flush=True)
+            print(
+                f"[{i}/{len(all_shards)}] merge {shard_name} targets={len(targets)} device={device}",
+                flush=True,
+            )
             merge_shard(
                 args.base_repo,
                 shard_name,
@@ -731,13 +799,18 @@ def main() -> None:
             for n, (_, shard_name, targets) in enumerate(pending)
         ]
         started = {shard_name: (i, targets) for i, shard_name, targets in pending}
-        with ProcessPoolExecutor(max_workers=jobs, mp_context=get_context("fork")) as pool:
+        with ProcessPoolExecutor(
+            max_workers=jobs, mp_context=get_context("fork")
+        ) as pool:
             futures = {}
             for item in task_args:
                 shard_name = item[1]
                 i, targets = started[shard_name]
                 device = item[7]
-                print(f"[{i}/{len(all_shards)}] submit {shard_name} targets={len(targets)} device={device}", flush=True)
+                print(
+                    f"[{i}/{len(all_shards)}] submit {shard_name} targets={len(targets)} device={device}",
+                    flush=True,
+                )
                 futures[pool.submit(merge_shard_task, item)] = shard_name
             done = 0
             for future in as_completed(futures):
