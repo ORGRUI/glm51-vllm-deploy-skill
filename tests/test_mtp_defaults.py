@@ -74,6 +74,7 @@ def test_serve_dry_run_records_default_mtp_argv(tmp_path: Path):
 
     assert len(argv_files) == 1
     data = json.loads(argv_files[0].read_text())
+    assert data["host"] == "127.0.0.1"
     assert data["enable_mtp"] == "1"
     assert data["speculative_config"] == DEFAULT_SPEC_CONFIG
     assert f"--speculative-config={DEFAULT_SPEC_CONFIG}" in data["server_argv"]
