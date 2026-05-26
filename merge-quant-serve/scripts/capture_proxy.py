@@ -131,6 +131,28 @@ def disable_thinking_in_chat_request(value: Any) -> bool:
     return True
 
 
+def thinking_disabled_in_chat_request(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("enable_thinking") is False:
+        return True
+    chat_template_kwargs = value.get("chat_template_kwargs")
+    return (
+        isinstance(chat_template_kwargs, dict)
+        and chat_template_kwargs.get("enable_thinking") is False
+    )
+
+
+def should_sanitize_thinking_markers(request: web.Request, body: bytes) -> bool:
+    if request.path != "/v1/chat/completions":
+        return False
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return thinking_disabled_in_chat_request(parsed)
+
+
 class ReplacementCharMasker:
     """Drop literal UTF-8 U+FFFD bytes while preserving chunk-boundary matches."""
 
@@ -170,6 +192,52 @@ class ReplacementCharMasker:
         self._pending = b""
         self.count += tail.count(self.NEEDLE)
         return tail.replace(self.NEEDLE, b"")
+
+
+class LiteralBytesMasker:
+    """Drop configured byte sequences while preserving chunk-boundary matches."""
+
+    def __init__(self, needles: Iterable[bytes]) -> None:
+        self.needles = tuple(sorted(set(needles), key=len, reverse=True))
+        self._pending = b""
+        self.count = 0
+
+    def feed(self, chunk: bytes) -> bytes:
+        combined = self._pending + chunk
+        if not combined:
+            return b""
+
+        hold_back = self._suffix_prefix_len(combined)
+        if len(combined) == hold_back:
+            self._pending = combined
+            return b""
+
+        if hold_back:
+            head = combined[:-hold_back]
+            self._pending = combined[-hold_back:]
+        else:
+            head = combined
+            self._pending = b""
+        return self._mask(head)
+
+    def finish(self) -> bytes:
+        tail = self._pending
+        self._pending = b""
+        return self._mask(tail)
+
+    def _suffix_prefix_len(self, chunk: bytes) -> int:
+        max_len = max((len(needle) for needle in self.needles), default=1) - 1
+        for size in range(min(max_len, len(chunk)), 0, -1):
+            suffix = chunk[-size:]
+            if any(needle.startswith(suffix) for needle in self.needles):
+                return size
+        return 0
+
+    def _mask(self, chunk: bytes) -> bytes:
+        for needle in self.needles:
+            self.count += chunk.count(needle)
+            chunk = chunk.replace(needle, b"")
+        return chunk
 
 
 async def capture_request(
@@ -459,6 +527,7 @@ async def make_app(
     mask_replacement_char: bool,
     normalize_tool_call_arguments: bool,
     disable_thinking: bool,
+    sanitize_thinking_markers: bool,
 ) -> web.Application:
     timeout = ClientTimeout(total=None, sock_connect=30, sock_read=None)
     session = ClientSession(timeout=timeout)
@@ -481,6 +550,11 @@ async def make_app(
         )
         meta["request_transform"] = request_transform
         meta["upstream_request_bytes"] = len(upstream_body)
+        sanitize_response_thinking_markers = (
+            sanitize_thinking_markers
+            and should_sanitize_thinking_markers(request, upstream_body)
+        )
+        meta["sanitize_response_thinking_markers"] = sanitize_response_thinking_markers
         if upstream_body != body:
             forwarded_body_path = Path(str(meta["body_path"])).with_suffix(
                 ".forwarded.json"
@@ -531,26 +605,37 @@ async def make_app(
             bytes_out = 0
             response_digest = hashlib.sha256()
             response_masker = ReplacementCharMasker() if mask_replacement_char else None
+            thinking_marker_masker = (
+                LiteralBytesMasker((b"<|assistant|>", b"</think>"))
+                if sanitize_response_thinking_markers
+                else None
+            )
+
+            async def write_out_chunk(out_chunk: bytes) -> None:
+                nonlocal bytes_out
+                if not out_chunk:
+                    return
+                bytes_out += len(out_chunk)
+                response_digest.update(out_chunk)
+                response_file.write(out_chunk)
+                sse_capture.feed(out_chunk)
+                await response.write(out_chunk)
+
             with response_body_path.open("wb") as response_file:
                 async for chunk in upstream_resp.content.iter_chunked(65536):
                     out_chunk = (
                         response_masker.feed(chunk) if response_masker else chunk
                     )
-                    if not out_chunk:
-                        continue
-                    bytes_out += len(out_chunk)
-                    response_digest.update(out_chunk)
-                    response_file.write(out_chunk)
-                    sse_capture.feed(out_chunk)
-                    await response.write(out_chunk)
+                    if thinking_marker_masker:
+                        out_chunk = thinking_marker_masker.feed(out_chunk)
+                    await write_out_chunk(out_chunk)
                 if response_masker:
                     out_chunk = response_masker.finish()
-                    if out_chunk:
-                        bytes_out += len(out_chunk)
-                        response_digest.update(out_chunk)
-                        response_file.write(out_chunk)
-                        sse_capture.feed(out_chunk)
-                        await response.write(out_chunk)
+                    if thinking_marker_masker:
+                        out_chunk = thinking_marker_masker.feed(out_chunk)
+                    await write_out_chunk(out_chunk)
+                if thinking_marker_masker:
+                    await write_out_chunk(thinking_marker_masker.finish())
             sse_capture.finish()
             await response.write_eof()
 
@@ -576,6 +661,10 @@ async def make_app(
         if mask_replacement_char and response_masker:
             response_summary["masked_replacement_chars_in_response"] = (
                 response_masker.count
+            )
+        if thinking_marker_masker:
+            response_summary["sanitized_thinking_markers_in_response"] = (
+                thinking_marker_masker.count
             )
         meta.update(response_summary)
         write_json(Path(str(meta["meta_path"])), meta)
@@ -691,6 +780,28 @@ def main() -> None:
     parser.set_defaults(
         disable_thinking=env_flag("CAPTURE_PROXY_DISABLE_THINKING", True)
     )
+    sanitize_thinking_markers_group = parser.add_mutually_exclusive_group()
+    sanitize_thinking_markers_group.add_argument(
+        "--sanitize-thinking-markers",
+        dest="sanitize_thinking_markers",
+        action="store_true",
+        help=(
+            "Remove generated GLM thinking-template markers from downstream "
+            "responses when enable_thinking=false."
+        ),
+    )
+    sanitize_thinking_markers_group.add_argument(
+        "--no-sanitize-thinking-markers",
+        dest="sanitize_thinking_markers",
+        action="store_false",
+        help="Forward downstream thinking-template markers unchanged.",
+    )
+    parser.set_defaults(
+        sanitize_thinking_markers=env_flag(
+            "CAPTURE_PROXY_SANITIZE_THINKING_MARKERS",
+            True,
+        )
+    )
     args = parser.parse_args()
 
     capture_dir = Path(args.capture_dir)
@@ -707,6 +818,7 @@ def main() -> None:
             args.mask_replacement_char,
             args.normalize_tool_call_arguments,
             args.disable_thinking,
+            args.sanitize_thinking_markers,
         )
     )
 
@@ -719,7 +831,8 @@ def main() -> None:
         f"default_max_tokens={args.default_max_tokens}, "
         f"mask_replacement_char={args.mask_replacement_char}, "
         f"normalize_tool_call_arguments={args.normalize_tool_call_arguments}, "
-        f"disable_thinking={args.disable_thinking}",
+        f"disable_thinking={args.disable_thinking}, "
+        f"sanitize_thinking_markers={args.sanitize_thinking_markers}",
         flush=True,
     )
     web.run_app(app, host=args.host, port=args.port, loop=loop, handle_signals=False)

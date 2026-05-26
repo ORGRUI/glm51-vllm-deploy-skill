@@ -30,7 +30,7 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, request-side `chat_template_kwargs.enable_thinking=false` when omitted, no forced temperature by default, and response-side GLM thinking-template marker sanitization for no-thinking chat requests.
 
 ## One-Command Stages
 
