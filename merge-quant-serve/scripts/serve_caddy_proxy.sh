@@ -18,6 +18,9 @@ CADDY_CONTAINER_NAME="${CADDY_CONTAINER_NAME:-amd-profiling-caddy}"
 CADDY_LISTEN="${CADDY_LISTEN:-:7777}"
 CADDY_BIND="${CADDY_BIND:-}"
 CADDY_UPSTREAM="${CADDY_UPSTREAM:-127.0.0.1:18080}"
+CADDY_METRICS_UPSTREAM="${CADDY_METRICS_UPSTREAM:-127.0.0.1:${VLLM_PORT:-7788}}"
+CADDY_GRAFANA_UPSTREAM="${CADDY_GRAFANA_UPSTREAM:-127.0.0.1:${GRAFANA_PORT:-3000}}"
+CADDY_PROMETHEUS_UPSTREAM="${CADDY_PROMETHEUS_UPSTREAM:-127.0.0.1:${PROMETHEUS_PORT:-9090}}"
 CADDYFILE="${CADDYFILE:-${ROOT}/configs/Caddyfile.capture-proxy}"
 SUDO_PASSWORD="${SUDO_PASSWORD:-}"
 
@@ -37,6 +40,9 @@ if [[ -n "${CADDY_BIND}" ]]; then
 fi
 
 cat >>"${CADDYFILE}" <<EOF
+  redir /grafana /grafana/ 308
+  redir /prometheus /prometheus/ 308
+
   @health {
     method GET
     path /health
@@ -44,11 +50,23 @@ cat >>"${CADDYFILE}" <<EOF
   @api {
     path /v1 /v1/*
   }
+  @metrics {
+    path /metrics
+  }
+  handle /grafana/* {
+    reverse_proxy ${CADDY_GRAFANA_UPSTREAM}
+  }
+  handle /prometheus/* {
+    reverse_proxy ${CADDY_PROMETHEUS_UPSTREAM}
+  }
   handle @health {
     respond "OK" 200
   }
   handle @api {
     reverse_proxy ${CADDY_UPSTREAM}
+  }
+  handle @metrics {
+    reverse_proxy ${CADDY_METRICS_UPSTREAM}
   }
   respond 404
 }
@@ -87,6 +105,9 @@ run_docker -d --name "${CADDY_CONTAINER_NAME}" \
   "${CADDY_IMAGE}" >/dev/null
 
 echo "Caddy proxy started on ${CADDY_LISTEN} -> ${CADDY_UPSTREAM}"
+echo "Caddy metrics upstream: ${CADDY_METRICS_UPSTREAM}"
+echo "Caddy Grafana upstream: ${CADDY_GRAFANA_UPSTREAM}"
+echo "Caddy Prometheus upstream: ${CADDY_PROMETHEUS_UPSTREAM}"
 if [[ -n "${CADDY_BIND}" ]]; then
   echo "Caddy bind: ${CADDY_BIND}"
 fi

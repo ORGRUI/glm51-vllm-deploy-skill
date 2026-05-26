@@ -30,7 +30,7 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, MTP enabled with `--speculative-config={"method":"mtp","num_speculative_tokens":1}`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, MTP enabled with `--speculative-config={"method":"mtp","num_speculative_tokens":1}`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, request-side `chat_template_kwargs.enable_thinking=false` when omitted, and single-port observability enabled by default.
 
 MTP defaults are controlled by `VLLM_ENABLE_MTP=1` and `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`. Set `VLLM_ENABLE_MTP=0` to keep the standard serve defaults but omit MTP, or set `VLLM_EXTRA_ARGS` explicitly to fully override the generated vLLM extra args.
 
@@ -53,6 +53,7 @@ From this skill directory:
 ./scripts/run_stage.sh write-serve-env
 ./scripts/run_stage.sh serve-backend
 ./scripts/run_stage.sh serve-proxy
+./scripts/run_stage.sh serve-observability
 ./scripts/run_stage.sh serve-caddy
 ./scripts/run_stage.sh smoke
 ./scripts/run_stage.sh benchmark
@@ -66,7 +67,31 @@ For a full run after confirmation:
 
 If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the resolved `OSS_URL` for later stages.
 
-Treat `serve-backend -> serve-proxy -> serve-caddy -> smoke` as the standard service restart sequence. `serve-backend` only replaces the vLLM backend container; `serve-caddy` always restarts the public `:7777` Caddy container so a runtime restart leaves the public endpoint in the expected state.
+Treat `serve-backend -> serve-proxy -> serve-observability -> serve-caddy -> smoke` as the standard service restart sequence. `serve-backend` only replaces the vLLM backend container; `serve-observability` starts Prometheus and Grafana bound to localhost; `serve-caddy` always restarts the public `:7777` Caddy container so a runtime restart leaves the public endpoint in the expected state.
+
+## Default Single-Port Observability
+
+`deploy-all` now starts vLLM/ATOM, the capture proxy, Prometheus, Grafana, and Caddy by default. Only Caddy should listen on the external interface:
+
+- `PUBLIC_BASE_URL=http://<ip>:7777/v1` for OpenAI-compatible clients.
+- `PUBLIC_ROOT_URL=http://<ip>:7777` for generated Grafana and Prometheus subpath URLs. If omitted, it is derived from `PUBLIC_BASE_URL` when possible.
+- `/v1/*` routes through the capture proxy to vLLM/ATOM.
+- `/metrics` routes to the vLLM/ATOM backend metrics endpoint.
+- `/grafana/` routes to Grafana, provisioned with the bundled `ATOM / ATOM vLLM Overview` dashboard.
+- `/prometheus/` routes to Prometheus.
+
+Do not publish `7791`/`7788`, `18080`, `9090`, or `3000` externally in the default flow. Prometheus and Grafana are launched with host networking but bind to `127.0.0.1`; Caddy is the only public listener on `:7777`.
+
+Use `OBSERVABILITY_ENABLED=0` only when the user explicitly wants inference without the dashboard stack. Useful overrides are `PROMETHEUS_IMAGE`, `GRAFANA_IMAGE`, `CADDY_IMAGE`, `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, `PROMETHEUS_PORT`, `GRAFANA_PORT`, and `VLLM_SCRAPE_INTERVAL`.
+
+The default implementation intentionally uses `docker run` rather than requiring `docker compose`. On the verified target host, Compose v2 was missing and `vmadmin` could not access `/var/run/docker.sock` directly. The serve scripts therefore:
+
+- try plain `docker` first;
+- fall back to `sudo -S docker` when the socket is not accessible;
+- use `SUDO_PASSWORD` only if the remote account requires a password for sudo;
+- keep the stack on host networking with localhost-bound internals so the external exposure remains `7777` only.
+
+During preflight, record whether `docker compose version` is available and whether `docker ps` works without sudo. If Compose is absent, continue with the bundled `docker run` path. If both direct Docker and non-interactive sudo fail, stop and ask for Docker group membership, passwordless sudo for Docker, or a usable `SUDO_PASSWORD`.
 
 ## Bundled Script Entrypoints
 
@@ -79,6 +104,7 @@ Treat `serve-backend -> serve-proxy -> serve-caddy -> smoke` as the standard ser
 - `scripts/quantize_glm51_fp8_block128.py`: produce attachment-style `FineGrainedFP8Config` block-128 artifact by streaming safetensors shards and writing `weight_scale_inv` tensors directly, including MoE experts. Use `--devices` and `--workers` to quantize shards concurrently across multiple GPUs.
 - `scripts/serve_vllm_glm51.sh`: launch vLLM + ATOM backend.
 - `scripts/capture_proxy.py` and `scripts/serve_capture_proxy.sh`: OpenAI-compatible capture/rewrite proxy.
+- `scripts/serve_observability.sh`: launch Prometheus and Grafana on localhost with the bundled vLLM dashboard.
 - `scripts/serve_caddy_proxy.sh`: public `:7777` Caddy proxy.
 - `scripts/benchmark_vllm_glm51.sh`: throughput benchmark wrapper.
 
@@ -112,5 +138,15 @@ curl -fsS -H 'Content-Type: application/json' "$PUBLIC_BASE_URL/chat/completions
   -d '{"model":"'"${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"'","messages":[{"role":"user","content":"请直接给最终答案。问题：1+1等于几？"}],"temperature":0}'
 tail -1 "$REMOTE_ROOT/request_captures/index.jsonl" | python3 -c 'import json,pathlib,sys; row=json.loads(sys.stdin.read()); body=json.loads(pathlib.Path(row["forwarded_body_path"]).read_text()); assert body["max_tokens"] == 8192; assert body["chat_template_kwargs"]["enable_thinking"] is False; print("proxy defaults ok")'
 ```
+
+Also verify the single-port observability routes when `OBSERVABILITY_ENABLED` is not disabled:
+
+```bash
+curl -fsS "${PUBLIC_ROOT_URL%/}/metrics" | head
+curl -fsS "${PUBLIC_ROOT_URL%/}/prometheus/-/ready"
+curl -fsS "${PUBLIC_ROOT_URL%/}/grafana/api/health"
+```
+
+From the target host, Prometheus should show `up{job="vllm"} == 1`, and Grafana should list the `ATOM / ATOM vLLM Overview` dashboard.
 
 Record launch truth in the env file, wrapper logs, and `*.server_argv.json`.
