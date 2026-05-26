@@ -30,7 +30,7 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, merge untouched shards as symlinks, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
 
 ## One-Command Stages
 
@@ -74,7 +74,7 @@ Treat `serve-backend -> serve-proxy -> serve-caddy -> smoke` as the standard ser
 - `scripts/prefetch_glm51_base.py`: prefetch GLM-5.1 base shards into local NVMe HF cache.
 - `scripts/merge_glm51_lora_sharded.py`: merge LoRA into BF16 model shards, expand sparse expert representatives, reconstruct lm_head shards when possible, and emit `merge_summary.json`.
 - `scripts/validate_and_repair_safetensors_shards.py`: validate merged shard integrity and repair dangling links.
-- `scripts/quantize_glm51_fp8_block128.py`: produce attachment-style `FineGrainedFP8Config` block-128 artifact by streaming safetensors shards and writing `weight_scale_inv` tensors directly, including MoE experts.
+- `scripts/quantize_glm51_fp8_block128.py`: produce attachment-style `FineGrainedFP8Config` block-128 artifact by streaming safetensors shards and writing `weight_scale_inv` tensors directly, including MoE experts. Use `--devices` and `--workers` to quantize shards concurrently across multiple GPUs.
 - `scripts/serve_vllm_glm51.sh`: launch vLLM + ATOM backend.
 - `scripts/capture_proxy.py` and `scripts/serve_capture_proxy.sh`: OpenAI-compatible capture/rewrite proxy.
 - `scripts/serve_caddy_proxy.sh`: public `:7777` Caddy proxy.

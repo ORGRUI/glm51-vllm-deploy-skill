@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from pathlib import Path
 
 import torch
@@ -31,12 +33,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated CUDA devices, e.g. cuda:0,cuda:1 or 0,1.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of shard quantization workers. Multi-GPU runs use at most one worker per visible GPU.",
+    )
     return parser.parse_args()
 
 
-def configure_visible_devices(raw: str | None) -> None:
-    if not raw or os.environ.get("CUDA_VISIBLE_DEVICES"):
-        return
+def parse_cuda_device_ids(raw: str | None) -> list[str]:
+    if not raw:
+        return []
     devices = []
     for item in raw.split(","):
         item = item.strip()
@@ -45,8 +53,25 @@ def configure_visible_devices(raw: str | None) -> None:
         if item.startswith("cuda:"):
             item = item.split(":", 1)[1]
         devices.append(item)
-    if devices:
+    return devices
+
+
+def configure_visible_devices(raw: str | None) -> list[str] | None:
+    devices = parse_cuda_device_ids(raw)
+    if not devices:
+        return None
+    if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
+        return [f"cuda:{idx}" for idx in range(len(devices))]
+    return [f"cuda:{item}" for item in devices]
+
+
+def effective_quant_workers(requested_workers: int, devices: list[str]) -> int:
+    if requested_workers < 1:
+        raise ValueError("--workers must be >= 1")
+    if len(devices) <= 1:
+        return 1
+    return min(requested_workers, len(devices))
 
 
 def resolve_config_source(base_model_path: str) -> str:
@@ -298,6 +323,79 @@ def read_safetensors_index(model_path: Path) -> dict:
     return json.loads(index_path.read_text())
 
 
+def export_streaming_fp8_shard(
+    *,
+    source_root: Path,
+    export_dir: Path,
+    shard_name: str,
+    modules_to_not_convert: list[str],
+    weight_block_size: tuple[int, int],
+    device: str,
+) -> dict:
+    quant_device = torch.device(device)
+    shard_path = source_root / shard_name
+    out_shard_name = shard_name
+    shard_tensors: dict[str, torch.Tensor] = {}
+    export_weight_map: dict[str, str] = {}
+    shard_quantized = 0
+    shard_copied = 0
+    shard_scale_tensors = 0
+
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
+        for tensor_name in sorted(handle.keys()):
+            tensor = handle.get_tensor(tensor_name)
+            if is_quantizable_glm51_weight(
+                tensor_name,
+                tensor=tensor,
+                modules_to_not_convert=modules_to_not_convert,
+                weight_block_size=weight_block_size,
+            ):
+                quantized, scale_inv = quantize_block_fp8_tensor(
+                    tensor,
+                    block_size=weight_block_size,
+                    device=quant_device,
+                )
+                scale_name = tensor_name[: -len(".weight")] + ".weight_scale_inv"
+                shard_tensors[tensor_name] = quantized.contiguous()
+                shard_tensors[scale_name] = scale_inv.contiguous()
+                export_weight_map[tensor_name] = out_shard_name
+                export_weight_map[scale_name] = out_shard_name
+                shard_quantized += 1
+                shard_scale_tensors += 1
+            else:
+                shard_tensors[tensor_name] = tensor.contiguous()
+                export_weight_map[tensor_name] = out_shard_name
+                shard_copied += 1
+            del tensor
+
+    save_file(
+        shard_tensors, str(export_dir / out_shard_name), metadata={"format": "pt"}
+    )
+    del shard_tensors
+    if quant_device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    return {
+        "shard": out_shard_name,
+        "quantized_weight_count": shard_quantized,
+        "copied_tensor_count": shard_copied,
+        "scale_tensor_count": shard_scale_tensors,
+        "weight_map": export_weight_map,
+        "device": device,
+    }
+
+
+def export_streaming_fp8_shard_task(args: dict) -> dict:
+    return export_streaming_fp8_shard(
+        source_root=Path(args["source_root"]),
+        export_dir=Path(args["export_dir"]),
+        shard_name=args["shard_name"],
+        modules_to_not_convert=args["modules_to_not_convert"],
+        weight_block_size=tuple(args["weight_block_size"]),
+        device=args["device"],
+    )
+
+
 def export_streaming_fp8_checkpoint(
     *,
     base_model_path: str,
@@ -306,13 +404,17 @@ def export_streaming_fp8_checkpoint(
     config,
     quant_cfg: FineGrainedFP8Config,
     modules_to_not_convert: list[str],
+    devices: list[str] | None = None,
+    workers: int = 1,
 ) -> dict:
     source_root = Path(base_model_path)
     index_payload = read_safetensors_index(source_root)
     source_weight_map = index_payload["weight_map"]
     source_shards = sorted(set(source_weight_map.values()))
     weight_block_size = tuple(quant_cfg.weight_block_size)
-    quant_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if devices is None:
+        devices = ["cuda:0" if torch.cuda.is_available() else "cpu"]
+    workers = effective_quant_workers(workers, devices)
 
     config.quantization_config = quant_cfg.to_dict()
     config.save_pretrained(export_dir)
@@ -324,49 +426,60 @@ def export_streaming_fp8_checkpoint(
     scale_tensor_count = 0
     shard_summaries: list[dict] = []
 
-    for shard_idx, shard_name in enumerate(source_shards, start=1):
-        shard_path = source_root / shard_name
-        out_shard_name = shard_name
-        shard_tensors: dict[str, torch.Tensor] = {}
-        shard_quantized = 0
-        shard_copied = 0
-        with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
-            for tensor_name in sorted(handle.keys()):
-                tensor = handle.get_tensor(tensor_name)
-                if is_quantizable_glm51_weight(
-                    tensor_name,
-                    tensor=tensor,
-                    modules_to_not_convert=modules_to_not_convert,
-                    weight_block_size=weight_block_size,
-                ):
-                    quantized, scale_inv = quantize_block_fp8_tensor(
-                        tensor,
-                        block_size=weight_block_size,
-                        device=quant_device,
-                    )
-                    scale_name = tensor_name[: -len(".weight")] + ".weight_scale_inv"
-                    shard_tensors[tensor_name] = quantized.contiguous()
-                    shard_tensors[scale_name] = scale_inv.contiguous()
-                    export_weight_map[tensor_name] = out_shard_name
-                    export_weight_map[scale_name] = out_shard_name
-                    quantized_weight_count += 1
-                    scale_tensor_count += 1
-                    shard_quantized += 1
-                else:
-                    shard_tensors[tensor_name] = tensor.contiguous()
-                    export_weight_map[tensor_name] = out_shard_name
-                    copied_tensor_count += 1
-                    shard_copied += 1
-                del tensor
+    task_args = [
+        {
+            "source_root": str(source_root),
+            "export_dir": str(export_dir),
+            "shard_name": shard_name,
+            "modules_to_not_convert": modules_to_not_convert,
+            "weight_block_size": weight_block_size,
+            "device": devices[index % len(devices)],
+        }
+        for index, shard_name in enumerate(source_shards)
+    ]
+    shard_order = {shard_name: index for index, shard_name in enumerate(source_shards)}
 
-        save_file(
-            shard_tensors, str(export_dir / out_shard_name), metadata={"format": "pt"}
+    if workers <= 1:
+        results = [export_streaming_fp8_shard_task(item) for item in task_args]
+    else:
+        results = []
+        print(
+            json.dumps(
+                {
+                    "phase": "streaming_export_parallel",
+                    "workers": workers,
+                    "devices": devices,
+                    "shard_count": len(source_shards),
+                },
+                ensure_ascii=True,
+            ),
+            flush=True,
         )
+        mp_context_name = (
+            "spawn" if any(device.startswith("cuda") for device in devices) else "fork"
+        )
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=get_context(mp_context_name)
+        ) as pool:
+            futures = [
+                pool.submit(export_streaming_fp8_shard_task, item) for item in task_args
+            ]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    for shard_idx, result in enumerate(
+        sorted(results, key=lambda item: shard_order[item["shard"]]), start=1
+    ):
+        export_weight_map.update(result.pop("weight_map"))
+        quantized_weight_count += result["quantized_weight_count"]
+        copied_tensor_count += result["copied_tensor_count"]
+        scale_tensor_count += result["scale_tensor_count"]
         shard_summaries.append(
             {
-                "shard": out_shard_name,
-                "quantized_weight_count": shard_quantized,
-                "copied_tensor_count": shard_copied,
+                "shard": result["shard"],
+                "quantized_weight_count": result["quantized_weight_count"],
+                "copied_tensor_count": result["copied_tensor_count"],
+                "device": result["device"],
             }
         )
         print(
@@ -381,9 +494,6 @@ def export_streaming_fp8_checkpoint(
             ),
             flush=True,
         )
-        del shard_tensors
-        if quant_device.type == "cuda":
-            torch.cuda.empty_cache()
 
     total_size = sum(path.stat().st_size for path in export_dir.glob("*.safetensors"))
     export_index_payload = {
@@ -402,6 +512,8 @@ def export_streaming_fp8_checkpoint(
         "scale_tensor_count": scale_tensor_count,
         "source_shard_count": len(source_shards),
         "total_safetensors_bytes": total_size,
+        "workers": workers,
+        "devices": devices,
         "generation_config_sanitized_fields": fixed_generation_fields,
         "tokenizer_artifacts_copied": copied_tokenizer_artifacts,
         "shard_summaries": shard_summaries,
@@ -552,7 +664,7 @@ def rewrite_moe_expert_shards(
 
 def main() -> None:
     args = parse_args()
-    configure_visible_devices(args.devices)
+    requested_devices = configure_visible_devices(args.devices)
     export_dir = Path(args.export_dir)
     if export_dir.exists() and any(export_dir.iterdir()):
         raise RuntimeError(f"export_dir already exists and is non-empty: {export_dir}")
@@ -561,6 +673,8 @@ def main() -> None:
     cuda_count = torch.cuda.device_count()
     if cuda_count < 1:
         raise RuntimeError("FP8 quantization requires at least one visible CUDA device")
+    quant_devices = requested_devices or [f"cuda:{idx}" for idx in range(cuda_count)]
+    workers = effective_quant_workers(args.workers, quant_devices)
 
     config_source = resolve_config_source(args.base_model_path)
     print(
@@ -614,6 +728,8 @@ def main() -> None:
                 "quant_method": "fp8",
                 "quantizer": "FineGrainedFP8Config",
                 "strategy": "safetensors_streaming",
+                "workers": workers,
+                "devices": quant_devices,
                 "modules_to_not_convert_count": len(modules_to_not_convert),
                 "modules_to_not_convert_sample": modules_to_not_convert[:4],
             },
@@ -629,6 +745,8 @@ def main() -> None:
         config=config,
         quant_cfg=quant_cfg,
         modules_to_not_convert=modules_to_not_convert,
+        devices=quant_devices,
+        workers=workers,
     )
     print(
         json.dumps(
