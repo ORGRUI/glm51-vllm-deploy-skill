@@ -11,7 +11,7 @@ Usage: scripts/run_stage.sh <stage>
 Stages:
   derive resolve-source sync-scripts preflight prepare-env fetch-source
   prefetch-base merge validate-bf16 quantize stage-model write-serve-env
-  serve-backend serve-proxy serve-caddy smoke benchmark deploy-all
+  serve-backend serve-proxy serve-observability serve-caddy smoke benchmark deploy-all
 
 Required env for remote stages:
   SSH_HOST, REMOTE_ROOT, and either OSS_URL or TINKER_URL.
@@ -106,6 +106,12 @@ derive() {
   : "${ATOM_PROD_COMMIT:=2088bff453392d701a397d9e5008c9a400fc6eb1}"
   : "${PREFETCH_WORKERS:=16}"
   : "${EXTRACT_WORKERS:=$(nproc 2>/dev/null || echo 16)}"
+  : "${OBSERVABILITY_ENABLED:=1}"
+  : "${PROMETHEUS_IMAGE:=prom/prometheus:v2.55.1}"
+  : "${GRAFANA_IMAGE:=grafana/grafana:11.3.1}"
+  : "${CADDY_IMAGE:=caddy:2.8.4-alpine}"
+  : "${PUBLIC_ROOT_URL:=}"
+  : "${SUDO_PASSWORD:=}"
 
   require REMOTE_ROOT
   if [[ -z "${OSS_URL}" && -z "${TINKER_URL}" ]]; then
@@ -156,6 +162,12 @@ PY
   SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"
   VENV_PYTHON="${VENV_PYTHON:-${REMOTE_ROOT}/venv-merge/bin/python}"
   PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
+  if [[ -z "${PUBLIC_ROOT_URL}" && -n "${PUBLIC_BASE_URL}" ]]; then
+    PUBLIC_ROOT_URL="${PUBLIC_BASE_URL%/v1}"
+  fi
+  if [[ -z "${PUBLIC_ROOT_URL}" ]]; then
+    PUBLIC_ROOT_URL="http://127.0.0.1:7777"
+  fi
 
   export BASE_REPO OSS_URL TINKER_URL GPU_LEASE_BASE_URL GPU_LEASE_API_KEY
   export TRANSFER_JOBS_ENDPOINT TRANSFER_POLL_INTERVAL TRANSFER_TIMEOUT_SECONDS OSS_SHA256
@@ -169,12 +181,12 @@ PY
   export SCRATCH_ROOT HF_CACHE_DIR SERVE_HF_CACHE_DIR TMPDIR XDG_CACHE_HOME PIP_CACHE_DIR
   export OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH
   export MODEL_PATH ENV_FILE CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON PREFETCH_WORKERS EXTRACT_WORKERS
-  export PUBLIC_BASE_URL
+  export PUBLIC_BASE_URL OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE PUBLIC_ROOT_URL
 }
 
 print_derived() {
   derive
-  for name in SSH_HOST REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR TMPDIR PIP_CACHE_DIR OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE ATOM_SOURCE_DIR DOCKER_IMAGE TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT PUBLIC_BASE_URL; do
+  for name in SSH_HOST REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR TMPDIR PIP_CACHE_DIR OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE ATOM_SOURCE_DIR DOCKER_IMAGE TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT PUBLIC_BASE_URL PUBLIC_ROOT_URL OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE; do
     printf "%s=%s\n" "${name}" "${!name:-}"
   done
 }
@@ -182,7 +194,7 @@ print_derived() {
 remote_exports() {
   derive
   local name
-  for name in REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR SERVE_HF_CACHE_DIR TMPDIR XDG_CACHE_HOME PIP_CACHE_DIR OSS_URL OSS_SHA256 BASE_REPO OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON DOCKER_IMAGE TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT ROCM_TORCH_VERSION ROCM_TORCH_INDEX_URL ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT PREFETCH_WORKERS EXTRACT_WORKERS; do
+  for name in REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR SERVE_HF_CACHE_DIR TMPDIR XDG_CACHE_HOME PIP_CACHE_DIR OSS_URL OSS_SHA256 BASE_REPO OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON DOCKER_IMAGE TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT ROCM_TORCH_VERSION ROCM_TORCH_INDEX_URL ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT PREFETCH_WORKERS EXTRACT_WORKERS OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE PUBLIC_ROOT_URL SUDO_PASSWORD; do
     printf "export %s=%s\n" "${name}" "$(shell_quote "${!name:-}")"
   done
 }
@@ -207,8 +219,9 @@ resolve_source() {
 sync_scripts() {
   derive
   require SSH_HOST
-  ssh_exec "mkdir -p $(shell_quote "${REMOTE_ROOT}")/scripts $(shell_quote "${REMOTE_ROOT}")/logs $(shell_quote "${REMOTE_ROOT}")/configs"
+  ssh_exec "mkdir -p $(shell_quote "${REMOTE_ROOT}")/scripts $(shell_quote "${REMOTE_ROOT}")/logs $(shell_quote "${REMOTE_ROOT}")/configs $(shell_quote "${REMOTE_ROOT}")/observability-skill"
   scp_to_remote "${SKILL_DIR}"/scripts/* "${SSH_HOST}:$(shell_quote "${REMOTE_ROOT}")/scripts/"
+  scp_to_remote -r "${SKILL_DIR}"/observability/* "${SSH_HOST}:$(shell_quote "${REMOTE_ROOT}")/observability-skill/"
   ssh_exec "chmod +x $(shell_quote "${REMOTE_ROOT}")/scripts/"'*.sh'" $(shell_quote "${REMOTE_ROOT}")/scripts/"'*.py 2>/dev/null || true'
 }
 
@@ -259,7 +272,24 @@ if ! findmnt -rn "$LOCAL_SCRATCH_MOUNT" >/dev/null 2>&1; then
   exit 3
 fi
 if command -v docker >/dev/null 2>&1; then
-  docker_root=$(docker info --format "{{.DockerRootDir}}" 2>/dev/null || true)
+  if docker compose version >/dev/null 2>&1; then
+    docker compose version
+  else
+    echo "docker compose v2 is not available; bundled serve scripts will use docker run fallback"
+  fi
+  if docker ps >/dev/null 2>&1; then
+    echo "docker socket access: direct"
+    docker_root=$(docker info --format "{{.DockerRootDir}}" 2>/dev/null || true)
+  elif sudo -n docker ps >/dev/null 2>&1; then
+    echo "docker socket access: sudo"
+    docker_root=$(sudo -n docker info --format "{{.DockerRootDir}}" 2>/dev/null || true)
+  elif [ -n "${SUDO_PASSWORD:-}" ] && printf "%s\n" "$SUDO_PASSWORD" | sudo -S docker ps >/dev/null 2>&1; then
+    echo "docker socket access: sudo password"
+    docker_root=$(printf "%s\n" "$SUDO_PASSWORD" | sudo -S docker info --format "{{.DockerRootDir}}" 2>/dev/null || true)
+  else
+    echo "docker socket access requires sudo password or Docker group membership; set SUDO_PASSWORD if sudo prompts" >&2
+    exit 3
+  fi
   case "$docker_root" in
     "$DATA_DISK"/*|"") ;;
     *) echo "DockerRootDir must be under $DATA_DISK before pulling images: $docker_root" >&2; exit 3 ;;
@@ -377,6 +407,18 @@ CAPTURE_PROXY_NORMALIZE_TOOL_CALL_ARGUMENTS=$NORMALIZE_TOOL_CALL_ARGUMENTS
 CAPTURE_PROXY_DISABLE_THINKING=$DISABLE_THINKING
 CADDY_LISTEN=:7777
 CADDY_UPSTREAM=127.0.0.1:18080
+CADDY_METRICS_UPSTREAM=127.0.0.1:7788
+CADDY_GRAFANA_UPSTREAM=127.0.0.1:3000
+CADDY_PROMETHEUS_UPSTREAM=127.0.0.1:9090
+OBSERVABILITY_ENABLED=$OBSERVABILITY_ENABLED
+PROMETHEUS_IMAGE=$PROMETHEUS_IMAGE
+PROMETHEUS_PORT=9090
+GRAFANA_IMAGE=$GRAFANA_IMAGE
+GRAFANA_PORT=3000
+PUBLIC_ROOT_URL=$PUBLIC_ROOT_URL
+GRAFANA_ROOT_URL=${PUBLIC_ROOT_URL%/}/grafana/
+PROMETHEUS_EXTERNAL_URL=${PUBLIC_ROOT_URL%/}/prometheus/
+SKILL_OBSERVABILITY_ROOT=$REMOTE_ROOT/observability-skill
 EOF
 '
     ;;
@@ -388,6 +430,9 @@ ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_
     ;;
   serve-proxy)
     remote_stage 'AMD_PROFILING_ROOT="$REMOTE_ROOT" ATOM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_capture_proxy.sh"'
+    ;;
+  serve-observability)
+    remote_stage 'AMD_PROFILING_ROOT="$REMOTE_ROOT" ATOM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_observability.sh"'
     ;;
   serve-caddy)
     remote_stage 'AMD_PROFILING_ROOT="$REMOTE_ROOT" ATOM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_caddy_proxy.sh"'
@@ -408,7 +453,7 @@ ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_
       OSS_URL="$("${BASH_SOURCE[0]}" resolve-source)"
       export OSS_URL
     fi
-    for next_stage in sync-scripts preflight prepare-env fetch-source prefetch-base merge validate-bf16 quantize stage-model write-serve-env serve-backend serve-proxy serve-caddy smoke; do
+    for next_stage in sync-scripts preflight prepare-env fetch-source prefetch-base merge validate-bf16 quantize stage-model write-serve-env serve-backend serve-proxy serve-observability serve-caddy smoke; do
       "${BASH_SOURCE[0]}" "${next_stage}"
     done
     ;;
