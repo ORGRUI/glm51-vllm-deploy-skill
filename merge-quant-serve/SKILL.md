@@ -30,7 +30,7 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching disabled, merge untouched shards as symlinks, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, merge untouched shards as symlinks, capture proxy `max_tokens=8192` when omitted, and request-side `chat_template_kwargs.enable_thinking=false` when omitted.
 
 ## One-Command Stages
 
@@ -63,6 +63,8 @@ For a full run after confirmation:
 ```
 
 If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the resolved `OSS_URL` for later stages.
+
+Treat `serve-backend -> serve-proxy -> serve-caddy -> smoke` as the standard service restart sequence. `serve-backend` only replaces the vLLM backend container; `serve-caddy` always restarts the public `:7777` Caddy container so a runtime restart leaves the public endpoint in the expected state.
 
 ## Bundled Script Entrypoints
 

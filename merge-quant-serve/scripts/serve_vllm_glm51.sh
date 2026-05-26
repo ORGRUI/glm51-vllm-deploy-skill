@@ -31,9 +31,7 @@ HF_HOME="${HF_HOME:-${ROOT}/hf-cache}"
 HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
 SUDO_PASSWORD="${SUDO_PASSWORD:-}"
-# OPE-13 recovered official-partial service used this runtime path for the
-# 10k long Chinese/repeated-prefix validation.
-DEFAULT_VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --no-enable-prefix-caching'
+DEFAULT_VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching'
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-$DEFAULT_VLLM_EXTRA_ARGS}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-rocm}"
 VLLM_TRUST_REMOTE_CODE="${VLLM_TRUST_REMOTE_CODE:-1}"
@@ -72,18 +70,11 @@ run_docker_rm() {
   fi
 }
 
-remove_all_existing_containers() {
-  mapfile -t existing_containers < <(run_docker_ps -a --format '{{.ID}} {{.Names}}' 2>/dev/null | awk 'NF { print $1 }')
+remove_existing_backend_container() {
+  mapfile -t existing_containers < <(run_docker_ps -a --filter "name=^/${CONTAINER_NAME}$" --format '{{.ID}}' 2>/dev/null | awk 'NF')
   if [[ "${#existing_containers[@]}" -gt 0 ]]; then
-    echo "Removing all existing Docker containers before model launch: ${#existing_containers[@]}"
+    echo "Removing existing backend Docker container: ${CONTAINER_NAME}"
     run_docker_rm -f "${existing_containers[@]}" >/dev/null 2>&1 || true
-  fi
-
-  mapfile -t remaining_containers < <(run_docker_ps -a --format '{{.Names}}' 2>/dev/null | awk 'NF')
-  if [[ "${#remaining_containers[@]}" -gt 0 ]]; then
-    echo "ERROR: Docker containers remain after cleanup:" >&2
-    printf '  %s\n' "${remaining_containers[@]}" >&2
-    exit 1
   fi
 }
 
@@ -118,7 +109,7 @@ log_file="${ROOT}/logs/vllm_glm51_${timestamp}.log"
 cmd_file="${ROOT}/configs/vllm_glm51_${timestamp}.sh"
 argv_file="${ROOT}/configs/vllm_glm51_${timestamp}.server_argv.json"
 
-remove_all_existing_containers
+remove_existing_backend_container
 
 server_cmd=(
   vllm serve "${MODEL}"
