@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,3 +106,60 @@ def test_rewrite_keeps_explicit_enable_thinking():
     assert rewritten["chat_template_kwargs"]["enable_thinking"] is True
     assert rewritten["max_tokens"] == 8192
     assert "forwarded_enable_thinking" not in summary
+
+
+def test_detects_no_thinking_chat_requests_after_rewrite():
+    payload = {
+        "model": "glm51",
+        "messages": [{"role": "user", "content": "1+1"}],
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    assert capture_proxy.should_sanitize_thinking_markers(
+        FakeRequest(), json.dumps(payload).encode("utf-8")
+    )
+
+
+def test_thinking_marker_masker_removes_markers_across_chunks():
+    masker = capture_proxy.LiteralBytesMasker((b"<|assistant|>", b"</think>"))
+
+    output = b"".join(
+        [
+            masker.feed(b'data: {"choices":[{"delta":{"content":"<|assist'),
+            masker.feed(b'ant|>"}}]}\n\n'),
+            masker.feed(b'data: {"choices":[{"delta":{"content":"</thi'),
+            masker.feed(b'nk>I need"}}]}\n\n'),
+            masker.finish(),
+        ]
+    )
+
+    assert b"<|assistant|>" not in output
+    assert b"</think>" not in output
+    assert b'"content":""' in output
+    assert b'"content":"I need"' in output
+    assert masker.count == 2
+
+
+def test_run_stage_derive_does_not_force_temperature_by_default():
+    env = os.environ.copy()
+    env.pop("FORCE_TEMPERATURE", None)
+    env.update(
+        {
+            "REMOTE_ROOT": "/data/amd_profiling/test",
+            "OSS_URL": "https://example.com/model.tar.gz",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "merge-quant-serve" / "scripts" / "run_stage.sh"),
+            "derive",
+        ],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "FORCE_TEMPERATURE=" in result.stdout.splitlines()
