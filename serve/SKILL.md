@@ -51,7 +51,7 @@ The serve wrapper now carries the AMD recipe runtime knobs by default:
 export VLLM_ROCM_USE_AITER=1
 export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
 export VLLM_ROCM_USE_AITER_RMSNORM=0
-export VLLM_ENABLE_MTP=1
+export VLLM_ENABLE_MTP=0
 export VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":3}'
 ```
 
@@ -61,9 +61,11 @@ Unless `VLLM_EXTRA_ARGS` is explicitly set, generated vLLM argv includes:
 --async-scheduling \
 --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} \
 --enable-prefix-caching \
---block-size=1 \
---speculative-config={"method":"mtp","num_speculative_tokens":3}
+--block-size=1
 ```
+
+Set `VLLM_ENABLE_MTP=1` only for an isolated MTP canary. The public deployment
+default stays no-MTP until the MTP path reaches API readiness and passes E2E.
 
 This keeps the recipe-required `--tool-call-parser glm47`, `--reasoning-parser glm45`,
 `--enable-auto-tool-choice`, and `--chat-template-content-format string` defaults

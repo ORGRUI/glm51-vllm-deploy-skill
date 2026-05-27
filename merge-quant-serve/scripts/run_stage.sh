@@ -81,7 +81,7 @@ derive() {
   : "${MAX_NUM_SEQS:=2}"
   : "${MAX_NUM_BATCHED_TOKENS:=65536}"
   : "${GPU_MEMORY_UTILIZATION:=0.60}"
-  : "${VLLM_ENABLE_MTP:=1}"
+  : "${VLLM_ENABLE_MTP:=0}"
   if [[ -z "${VLLM_SPECULATIVE_CONFIG+x}" ]]; then
     VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":3}'
   fi

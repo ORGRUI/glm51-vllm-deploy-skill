@@ -37,14 +37,24 @@ def run_stage_derive(**env_overrides: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
 
-def test_run_stage_defaults_mtp_on():
+def test_run_stage_defaults_mtp_off():
     derived = run_stage_derive()
 
-    assert derived["VLLM_ENABLE_MTP"] == "1"
+    assert derived["VLLM_ENABLE_MTP"] == "0"
     assert derived["VLLM_SPECULATIVE_CONFIG"] == DEFAULT_SPEC_CONFIG
     assert derived["VLLM_ROCM_USE_AITER"] == "1"
     assert derived["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] == "INT4"
     assert derived["VLLM_ROCM_USE_AITER_RMSNORM"] == "0"
+    assert "--block-size=1" in derived["VLLM_EXTRA_ARGS"]
+    assert "--enable-prefix-caching" in derived["VLLM_EXTRA_ARGS"]
+    assert "--speculative-config=" not in derived["VLLM_EXTRA_ARGS"]
+
+
+def test_run_stage_can_enable_mtp_canary():
+    derived = run_stage_derive(VLLM_ENABLE_MTP="1")
+
+    assert derived["VLLM_ENABLE_MTP"] == "1"
+    assert derived["VLLM_SPECULATIVE_CONFIG"] == DEFAULT_SPEC_CONFIG
     assert "--block-size=1" in derived["VLLM_EXTRA_ARGS"]
     assert f"--speculative-config={DEFAULT_SPEC_CONFIG}" in derived["VLLM_EXTRA_ARGS"]
 
@@ -133,7 +143,7 @@ def test_run_stage_can_force_temperature_when_explicit():
     assert derived["FORCE_TEMPERATURE"] == "0"
 
 
-def test_serve_dry_run_records_default_mtp_argv(tmp_path: Path):
+def test_serve_dry_run_records_default_no_mtp_argv(tmp_path: Path):
     env = os.environ.copy()
     env.update(
         {
@@ -159,7 +169,7 @@ def test_serve_dry_run_records_default_mtp_argv(tmp_path: Path):
     assert len(argv_files) == 1
     data = json.loads(argv_files[0].read_text())
     assert data["host"] == "127.0.0.1"
-    assert data["enable_mtp"] == "1"
+    assert data["enable_mtp"] == "0"
     assert data["speculative_config"] == DEFAULT_SPEC_CONFIG
     assert data["rocm_use_aiter"] == "1"
     assert data["rocm_quick_reduce_quantization"] == "INT4"
@@ -169,4 +179,31 @@ def test_serve_dry_run_records_default_mtp_argv(tmp_path: Path):
     assert data["tool_parser_patch_ref"] == TOOL_PARSER_PATCH_REF
     assert data["tool_parser_patch_commit"] == TOOL_PARSER_PATCH_COMMIT
     assert "--block-size=1" in data["server_argv"]
+    assert all("--speculative-config" not in arg for arg in data["server_argv"])
+
+
+def test_serve_dry_run_records_explicit_mtp_argv(tmp_path: Path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "AMD_PROFILING_ROOT": str(tmp_path),
+            "VLLM_MODEL": "/tmp",
+            "VLLM_DRY_RUN": "1",
+            "VLLM_ENABLE_MTP": "1",
+        }
+    )
+    subprocess.run(
+        [str(SERVE_VLLM)],
+        check=True,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    argv_files = sorted((tmp_path / "configs").glob("*.server_argv.json"))
+
+    assert len(argv_files) == 1
+    data = json.loads(argv_files[0].read_text())
+    assert data["enable_mtp"] == "1"
+    assert data["speculative_config"] == DEFAULT_SPEC_CONFIG
     assert f"--speculative-config={DEFAULT_SPEC_CONFIG}" in data["server_argv"]

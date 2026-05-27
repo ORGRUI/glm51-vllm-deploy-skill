@@ -83,10 +83,13 @@ The branch defaults already translate the recipe serve settings into the pipelin
 VLLM_ROCM_USE_AITER=1
 VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
 VLLM_ROCM_USE_AITER_RMSNORM=0
-VLLM_ENABLE_MTP=1
+VLLM_ENABLE_MTP=0
 VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":3}'
-VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching --block-size=1 --speculative-config={"method":"mtp","num_speculative_tokens":3}'
+VLLM_EXTRA_ARGS='--async-scheduling --compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} --enable-prefix-caching --block-size=1'
 ```
+
+Use `VLLM_ENABLE_MTP=1` only for an isolated canary. The accepted public endpoint
+must remain no-MTP until the MTP path reaches readiness and passes E2E.
 
 ## Intentional Differences From The Recipe
 

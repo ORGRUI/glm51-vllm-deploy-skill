@@ -40,9 +40,9 @@ export FP8_OUT=/local_nvme/amd_profiling/<run>/models/<run>-merged-fp8-finegrain
 export MODEL_PATH=/local_nvme/amd_profiling/<run>/serve/<run>-merged-fp8-finegrained-block128
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, `--block-size=1`, MTP enabled with `--speculative-config={"method":"mtp","num_speculative_tokens":3}`, ROCm recipe env `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`, `VLLM_ROCM_USE_AITER_RMSNORM=0`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, no default temperature override, request-side `chat_template_kwargs.enable_thinking=false` when omitted, and single-port observability enabled by default.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, `--block-size=1`, MTP off by default, ROCm recipe env `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`, `VLLM_ROCM_USE_AITER_RMSNORM=0`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, no default temperature override, request-side `chat_template_kwargs.enable_thinking=false` when omitted, and single-port observability enabled by default.
 
-MTP defaults are controlled by `VLLM_ENABLE_MTP=1` and `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":3}'`, matching Ajith's GLM-5.1 AMD recipe. Set `VLLM_ENABLE_MTP=0` to keep the standard serve defaults but omit MTP, or set `VLLM_EXTRA_ARGS` explicitly to fully override the generated vLLM extra args.
+MTP is an explicit canary path controlled by `VLLM_ENABLE_MTP=1` and `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":3}'`, matching Ajith's GLM-5.1 AMD recipe. Leave `VLLM_ENABLE_MTP` unset or set it to `0` for the accepted public deployment path, or set `VLLM_EXTRA_ARGS` explicitly to fully override the generated vLLM extra args. Do not switch the public endpoint to MTP until the canary reaches API readiness and passes E2E.
 
 The recipe-first reference lives in `../ajith-vllm-recipe/`. Use it when the task is to reproduce the official native FP8 flow rather than this repo's Tinker adapter merge, quantize, capture proxy, and observability pipeline.
 
@@ -50,7 +50,7 @@ Temperature passthrough is the default. Leave `FORCE_TEMPERATURE` unset or empty
 
 ## Pinned Runtime Versions
 
-The verified MTP runtime is pinned by default and must be preserved in deployment summaries:
+The MTP canary runtime is pinned and must be preserved in deployment summaries when MTP is enabled:
 
 - vLLM package: `0.19.1rc1.dev90+g5af684c31`.
 - vLLM GLM tool parser patch: PR 39253, `[Bugfix] Fix GLM tool parser streaming with MTP or stream interval`, `refs/pull/39253/head`, commit `920af3c7a1b29847fb237fa9a9aaedacf48e8bbd`.
@@ -62,7 +62,7 @@ Install and patch order:
 2. Ensure the image contains vLLM `0.19.1rc1.dev90+g5af684c31`.
 3. Apply vLLM PR 39253's GLM tool parser patch on top of that vLLM package.
 4. Clone ATOM from `https://github.com/san-tian/ATOM.git`, fetch `fix/mtp-arange-buffer-token-capacity`, and checkout `d5f9a49bb2b6f3e82fda35e411d3cd962c19bf15`.
-5. Write the serve env with `VLLM_SOURCE_DIR=$ATOM_SOURCE_DIR`, MTP enabled, the speculative config above, `--block-size=1`, and the ROCm AITER env values above.
+5. Write the serve env with `VLLM_SOURCE_DIR=$ATOM_SOURCE_DIR`, MTP disabled for public deploys, `--block-size=1`, and the ROCm AITER env values above. For an MTP canary, set `VLLM_ENABLE_MTP=1` and record the speculative config above.
 
 `scripts/run_stage.sh write-serve-env` records `VLLM_EXPECTED_VERSION`, `VLLM_TOOL_PARSER_PATCH_PR`, `VLLM_TOOL_PARSER_PATCH_REF`, and `VLLM_TOOL_PARSER_PATCH_COMMIT`. `scripts/serve_vllm_glm51.sh` writes those values into `*.server_argv.json` and, before starting `vllm serve`, fails fast if the container vLLM version does not match or the PR 39253 parser marker is absent.
 
