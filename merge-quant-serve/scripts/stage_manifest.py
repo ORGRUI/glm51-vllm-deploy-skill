@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -15,7 +16,6 @@ STAGE_FILES = {
         "merge/SKILL.md",
         "merge/scripts/run_merge.sh",
         "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/run_stage.sh",
         "merge-quant-serve/scripts/stage_manifest.py",
         "merge-quant-serve/scripts/resolve_model_source.py",
         "merge-quant-serve/scripts/prepare_oss_lora_source.py",
@@ -27,7 +27,6 @@ STAGE_FILES = {
         "quant/SKILL.md",
         "quant/scripts/run_quant.sh",
         "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/run_stage.sh",
         "merge-quant-serve/scripts/stage_manifest.py",
         "merge-quant-serve/scripts/quantize_glm51_fp8_block128.py",
     ],
@@ -35,7 +34,6 @@ STAGE_FILES = {
         "serve/SKILL.md",
         "serve/scripts/run_serve.sh",
         "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/run_stage.sh",
         "merge-quant-serve/scripts/stage_manifest.py",
         "merge-quant-serve/scripts/serve_vllm_glm51.sh",
         "merge-quant-serve/scripts/serve_capture_proxy.sh",
@@ -48,6 +46,41 @@ STAGE_FILES = {
         "merge-quant-serve/observability/grafana/dashboards/vllm-overview.json",
     ],
 }
+
+RUN_STAGE_ARMS = {
+    "merge": [
+        "resolve-source",
+        "sync-scripts",
+        "preflight",
+        "prepare-env",
+        "fetch-source",
+        "prefetch-base",
+        "merge",
+        "validate-bf16",
+        "merge-all",
+    ],
+    "quant": [
+        "sync-scripts",
+        "preflight",
+        "prepare-env",
+        "quantize",
+        "stage-model",
+        "quant-all",
+    ],
+    "serve": [
+        "sync-scripts",
+        "write-serve-env",
+        "serve-backend",
+        "serve-proxy",
+        "serve-observability",
+        "serve-caddy",
+        "smoke",
+        "benchmark",
+        "serve-all",
+    ],
+}
+
+CASE_LABEL_RE = re.compile(r"^  ([A-Za-z0-9_-]+(?:\|[A-Za-z0-9_-]+)*)\)$")
 
 
 def read_json(path: str | None) -> dict[str, Any] | None:
@@ -73,6 +106,25 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def extract_case_arm(script: str, label: str) -> str:
+    lines = script.splitlines(keepends=True)
+    start = None
+    for index, line in enumerate(lines):
+        match = CASE_LABEL_RE.match(line)
+        if match and label in match.group(1).split("|"):
+            start = index
+            break
+    if start is None:
+        raise SystemExit(f"run_stage.sh case arm missing: {label}")
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if CASE_LABEL_RE.match(lines[index]):
+            end = index
+            break
+    return "".join(lines[start:end])
+
+
 def stage_hash(repo_root: Path, stage: str) -> str:
     digest = hashlib.sha256()
     for rel in STAGE_FILES[stage]:
@@ -82,6 +134,21 @@ def stage_hash(repo_root: Path, stage: str) -> str:
         digest.update(rel.encode())
         digest.update(b"\0")
         digest.update(file_sha256(path).encode())
+        digest.update(b"\0")
+    run_stage_path = repo_root / "merge-quant-serve/scripts/run_stage.sh"
+    if not run_stage_path.is_file():
+        raise SystemExit(
+            "stage hash input missing: merge-quant-serve/scripts/run_stage.sh"
+        )
+    run_stage = run_stage_path.read_text(encoding="utf-8")
+    for label in RUN_STAGE_ARMS[stage]:
+        digest.update(f"merge-quant-serve/scripts/run_stage.sh#{label}".encode())
+        digest.update(b"\0")
+        digest.update(
+            hashlib.sha256(extract_case_arm(run_stage, label).encode())
+            .hexdigest()
+            .encode()
+        )
         digest.update(b"\0")
     return digest.hexdigest()
 
