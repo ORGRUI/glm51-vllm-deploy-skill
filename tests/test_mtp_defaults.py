@@ -70,6 +70,19 @@ def test_run_stage_defaults_pinned_runtime_versions():
     assert derived["ATOM_PROD_COMMIT"] == ATOM_COMMIT
 
 
+def test_run_stage_does_not_force_temperature_by_default():
+    derived = run_stage_derive()
+
+    assert derived["FORCE_TEMPERATURE"] == ""
+    assert derived["DEFAULT_MAX_TOKENS"] == "8192"
+
+
+def test_run_stage_can_force_temperature_when_explicit():
+    derived = run_stage_derive(FORCE_TEMPERATURE="0")
+
+    assert derived["FORCE_TEMPERATURE"] == "0"
+
+
 def test_serve_dry_run_records_default_mtp_argv(tmp_path: Path):
     env = os.environ.copy()
     env.update(

@@ -90,7 +90,7 @@ derive() {
       VLLM_EXTRA_ARGS+=" --speculative-config=${VLLM_SPECULATIVE_CONFIG}"
     fi
   fi
-  : "${FORCE_TEMPERATURE:=1}"
+  : "${FORCE_TEMPERATURE:=}"
   : "${DEFAULT_MAX_TOKENS:=8192}"
   : "${NORMALIZE_TOOL_CALL_ARGUMENTS:=1}"
   : "${DISABLE_THINKING:=1}"
