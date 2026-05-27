@@ -83,6 +83,28 @@ def test_rewrite_defaults_max_tokens_and_disables_thinking_when_omitted():
     assert summary["forwarded_enable_thinking"] is False
 
 
+def test_rewrite_preserves_temperature_without_force_temperature():
+    payload = {
+        "model": "glm51",
+        "messages": [{"role": "user", "content": "1+1"}],
+        "temperature": 0.7,
+    }
+
+    body, summary = capture_proxy.rewrite_request_body(
+        FakeRequest(),
+        json.dumps(payload).encode("utf-8"),
+        force_temperature=None,
+        default_max_tokens=None,
+        mask_replacement_char=False,
+        normalize_tool_call_arguments=False,
+        disable_thinking=False,
+    )
+
+    rewritten = json.loads(body)
+    assert rewritten["temperature"] == 0.7
+    assert "forwarded_temperature" not in summary
+
+
 def test_rewrite_keeps_explicit_enable_thinking():
     payload = {
         "model": "glm51",

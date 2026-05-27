@@ -30,9 +30,11 @@ export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
 ```
 
-Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, MTP enabled with `--speculative-config={"method":"mtp","num_speculative_tokens":1}`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, request-side `chat_template_kwargs.enable_thinking=false` when omitted, and single-port observability enabled by default.
+Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, MTP enabled with `--speculative-config={"method":"mtp","num_speculative_tokens":1}`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, no default temperature override, request-side `chat_template_kwargs.enable_thinking=false` when omitted, and single-port observability enabled by default.
 
 MTP defaults are controlled by `VLLM_ENABLE_MTP=1` and `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`. Set `VLLM_ENABLE_MTP=0` to keep the standard serve defaults but omit MTP, or set `VLLM_EXTRA_ARGS` explicitly to fully override the generated vLLM extra args.
+
+Temperature passthrough is the default. Leave `FORCE_TEMPERATURE` unset or empty to forward the client's `temperature` unchanged; set `FORCE_TEMPERATURE=<float>` only when a deployment intentionally needs the capture proxy to override request temperatures.
 
 ## Pinned Runtime Versions
 
@@ -153,8 +155,8 @@ Minimal default rewrite check:
 
 ```bash
 curl -fsS -H 'Content-Type: application/json' "$PUBLIC_BASE_URL/chat/completions" \
-  -d '{"model":"'"${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"'","messages":[{"role":"user","content":"请直接给最终答案。问题：1+1等于几？"}],"temperature":0}'
-tail -1 "$REMOTE_ROOT/request_captures/index.jsonl" | python3 -c 'import json,pathlib,sys; row=json.loads(sys.stdin.read()); body=json.loads(pathlib.Path(row["forwarded_body_path"]).read_text()); assert body["max_tokens"] == 8192; assert body["chat_template_kwargs"]["enable_thinking"] is False; print("proxy defaults ok")'
+  -d '{"model":"'"${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"'","messages":[{"role":"user","content":"请直接给最终答案。问题：1+1等于几？"}],"temperature":0.7}'
+tail -1 "$REMOTE_ROOT/request_captures/index.jsonl" | python3 -c 'import json,pathlib,sys; row=json.loads(sys.stdin.read()); body=json.loads(pathlib.Path(row["forwarded_body_path"]).read_text()); assert body["max_tokens"] == 8192; assert body["temperature"] == 0.7; assert body["chat_template_kwargs"]["enable_thinking"] is False; print("proxy defaults ok")'
 ```
 
 Also verify the single-port observability routes when `OBSERVABILITY_ENABLED` is not disabled:
