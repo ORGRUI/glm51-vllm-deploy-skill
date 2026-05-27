@@ -15,35 +15,32 @@ STAGE_FILES = {
     "merge": [
         "merge/SKILL.md",
         "merge/scripts/run_merge.sh",
-        "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/stage_manifest.py",
-        "merge-quant-serve/scripts/resolve_model_source.py",
-        "merge-quant-serve/scripts/prepare_oss_lora_source.py",
-        "merge-quant-serve/scripts/prefetch_glm51_base.py",
-        "merge-quant-serve/scripts/merge_glm51_lora_sharded.py",
-        "merge-quant-serve/scripts/validate_and_repair_safetensors_shards.py",
+        "shared/scripts/stage_manifest.py",
+        "shared/scripts/resolve_model_source.py",
+        "shared/scripts/prepare_oss_lora_source.py",
+        "shared/scripts/prefetch_glm51_base.py",
+        "shared/scripts/merge_glm51_lora_sharded.py",
+        "shared/scripts/validate_and_repair_safetensors_shards.py",
     ],
     "quant": [
         "quant/SKILL.md",
         "quant/scripts/run_quant.sh",
-        "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/stage_manifest.py",
-        "merge-quant-serve/scripts/quantize_glm51_fp8_block128.py",
+        "shared/scripts/stage_manifest.py",
+        "shared/scripts/quantize_glm51_fp8_block128.py",
     ],
     "serve": [
         "serve/SKILL.md",
         "serve/scripts/run_serve.sh",
-        "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/stage_manifest.py",
-        "merge-quant-serve/scripts/serve_vllm_glm51.sh",
-        "merge-quant-serve/scripts/serve_capture_proxy.sh",
-        "merge-quant-serve/scripts/serve_observability.sh",
-        "merge-quant-serve/scripts/serve_caddy_proxy.sh",
-        "merge-quant-serve/scripts/capture_proxy.py",
-        "merge-quant-serve/scripts/benchmark_vllm_glm51.sh",
-        "merge-quant-serve/observability/grafana/provisioning/datasources/prometheus.yml",
-        "merge-quant-serve/observability/grafana/provisioning/dashboards/dashboards.yml",
-        "merge-quant-serve/observability/grafana/dashboards/vllm-overview.json",
+        "shared/scripts/stage_manifest.py",
+        "shared/scripts/serve_vllm_glm51.sh",
+        "shared/scripts/serve_capture_proxy.sh",
+        "shared/scripts/serve_observability.sh",
+        "shared/scripts/serve_caddy_proxy.sh",
+        "shared/scripts/capture_proxy.py",
+        "shared/scripts/benchmark_vllm_glm51.sh",
+        "shared/observability/grafana/provisioning/datasources/prometheus.yml",
+        "shared/observability/grafana/provisioning/dashboards/dashboards.yml",
+        "shared/observability/grafana/dashboards/vllm-overview.json",
     ],
 }
 
@@ -135,14 +132,12 @@ def stage_hash(repo_root: Path, stage: str) -> str:
         digest.update(b"\0")
         digest.update(file_sha256(path).encode())
         digest.update(b"\0")
-    run_stage_path = repo_root / "merge-quant-serve/scripts/run_stage.sh"
+    run_stage_path = repo_root / "shared/scripts/run_stage.sh"
     if not run_stage_path.is_file():
-        raise SystemExit(
-            "stage hash input missing: merge-quant-serve/scripts/run_stage.sh"
-        )
+        raise SystemExit("stage hash input missing: shared/scripts/run_stage.sh")
     run_stage = run_stage_path.read_text(encoding="utf-8")
     for label in RUN_STAGE_ARMS[stage]:
-        digest.update(f"merge-quant-serve/scripts/run_stage.sh#{label}".encode())
+        digest.update(f"shared/scripts/run_stage.sh#{label}".encode())
         digest.update(b"\0")
         digest.update(
             hashlib.sha256(extract_case_arm(run_stage, label).encode())

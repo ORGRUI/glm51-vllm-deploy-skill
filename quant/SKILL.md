@@ -36,7 +36,7 @@ From this skill directory:
 ./scripts/run_quant.sh
 ```
 
-This delegates to `../merge-quant-serve/scripts/run_stage.sh quant-all`, which runs:
+This delegates to `../shared/scripts/run_stage.sh quant-all`, which runs:
 
 ```text
 sync-scripts -> preflight -> prepare-env -> quantize -> stage-model

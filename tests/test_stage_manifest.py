@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGE_MANIFEST = ROOT / "merge-quant-serve" / "scripts" / "stage_manifest.py"
+STAGE_MANIFEST = ROOT / "shared" / "scripts" / "stage_manifest.py"
 
 
 def run_manifest(*args: str) -> str:
@@ -46,29 +46,35 @@ def copy_stage_hash_inputs(tmp_path: Path) -> Path:
         "quant/scripts/run_quant.sh",
         "serve/SKILL.md",
         "serve/scripts/run_serve.sh",
-        "merge-quant-serve/SKILL.md",
-        "merge-quant-serve/scripts/run_stage.sh",
-        "merge-quant-serve/scripts/stage_manifest.py",
-        "merge-quant-serve/scripts/resolve_model_source.py",
-        "merge-quant-serve/scripts/prepare_oss_lora_source.py",
-        "merge-quant-serve/scripts/prefetch_glm51_base.py",
-        "merge-quant-serve/scripts/merge_glm51_lora_sharded.py",
-        "merge-quant-serve/scripts/validate_and_repair_safetensors_shards.py",
-        "merge-quant-serve/scripts/quantize_glm51_fp8_block128.py",
-        "merge-quant-serve/scripts/serve_vllm_glm51.sh",
-        "merge-quant-serve/scripts/serve_capture_proxy.sh",
-        "merge-quant-serve/scripts/serve_observability.sh",
-        "merge-quant-serve/scripts/serve_caddy_proxy.sh",
-        "merge-quant-serve/scripts/capture_proxy.py",
-        "merge-quant-serve/scripts/benchmark_vllm_glm51.sh",
-        "merge-quant-serve/observability/grafana/provisioning/datasources/prometheus.yml",
-        "merge-quant-serve/observability/grafana/provisioning/dashboards/dashboards.yml",
-        "merge-quant-serve/observability/grafana/dashboards/vllm-overview.json",
+        "shared/scripts/run_stage.sh",
+        "shared/scripts/stage_manifest.py",
+        "shared/scripts/resolve_model_source.py",
+        "shared/scripts/prepare_oss_lora_source.py",
+        "shared/scripts/prefetch_glm51_base.py",
+        "shared/scripts/merge_glm51_lora_sharded.py",
+        "shared/scripts/validate_and_repair_safetensors_shards.py",
+        "shared/scripts/quantize_glm51_fp8_block128.py",
+        "shared/scripts/serve_vllm_glm51.sh",
+        "shared/scripts/serve_capture_proxy.sh",
+        "shared/scripts/serve_observability.sh",
+        "shared/scripts/serve_caddy_proxy.sh",
+        "shared/scripts/capture_proxy.py",
+        "shared/scripts/benchmark_vllm_glm51.sh",
+        "shared/observability/grafana/provisioning/datasources/prometheus.yml",
+        "shared/observability/grafana/provisioning/dashboards/dashboards.yml",
+        "shared/observability/grafana/dashboards/vllm-overview.json",
     ):
         target = repo_root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, target)
     return repo_root
+
+
+def test_combined_skill_entrypoint_is_retired():
+    public_skill_dirs = {path.parent.name for path in ROOT.glob("*/SKILL.md")}
+
+    assert "-".join(("merge", "quant", "serve")) not in public_skill_dirs
+    assert "shared" not in public_skill_dirs
 
 
 def test_stage_hash_changes_are_stage_scoped():
@@ -96,7 +102,7 @@ def test_serve_only_orchestrator_change_only_reruns_from_serve(tmp_path: Path):
         "hash-stage", "--repo-root", str(repo_root), "--stage", "serve"
     )
 
-    run_stage = repo_root / "merge-quant-serve" / "scripts" / "run_stage.sh"
+    run_stage = repo_root / "shared" / "scripts" / "run_stage.sh"
     original = run_stage.read_text(encoding="utf-8")
     updated = original.replace(
         'ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_vllm_glm51.sh"',

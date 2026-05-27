@@ -6,8 +6,8 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RUN_STAGE = ROOT / "merge-quant-serve" / "scripts" / "run_stage.sh"
-SERVE_VLLM = ROOT / "merge-quant-serve" / "scripts" / "serve_vllm_glm51.sh"
+RUN_STAGE = ROOT / "shared" / "scripts" / "run_stage.sh"
+SERVE_VLLM = ROOT / "shared" / "scripts" / "serve_vllm_glm51.sh"
 DEFAULT_SPEC_CONFIG = '{"method":"mtp","num_speculative_tokens":1}'
 EXPECTED_VLLM_VERSION = "0.19.1rc1.dev90+g5af684c31"
 TOOL_PARSER_PATCH_PR = "https://github.com/vllm-project/vllm/pull/39253"

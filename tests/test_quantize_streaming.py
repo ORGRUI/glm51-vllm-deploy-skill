@@ -10,9 +10,7 @@ from safetensors.torch import save_file
 from transformers import FineGrainedFP8Config, PretrainedConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-QUANTIZE_PATH = (
-    ROOT / "merge-quant-serve" / "scripts" / "quantize_glm51_fp8_block128.py"
-)
+QUANTIZE_PATH = ROOT / "shared" / "scripts" / "quantize_glm51_fp8_block128.py"
 
 spec = importlib.util.spec_from_file_location(
     "quantize_glm51_fp8_block128", QUANTIZE_PATH

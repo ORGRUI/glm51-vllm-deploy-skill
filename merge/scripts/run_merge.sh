@@ -16,4 +16,4 @@ EOF
   exit 0
 fi
 
-exec "${ROOT_DIR}/merge-quant-serve/scripts/run_stage.sh" "${STAGE}"
+exec "${ROOT_DIR}/shared/scripts/run_stage.sh" "${STAGE}"

@@ -35,7 +35,7 @@ From this skill directory:
 ./scripts/run_serve.sh
 ```
 
-This delegates to `../merge-quant-serve/scripts/run_stage.sh serve-all`, which runs:
+This delegates to `../shared/scripts/run_stage.sh serve-all`, which runs:
 
 ```text
 sync-scripts -> write-serve-env -> serve-backend -> serve-proxy -> serve-observability -> serve-caddy -> smoke

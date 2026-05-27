@@ -35,7 +35,7 @@ From this skill directory:
 ./scripts/run_merge.sh
 ```
 
-This delegates to `../merge-quant-serve/scripts/run_stage.sh merge-all`, which runs:
+This delegates to `../shared/scripts/run_stage.sh merge-all`, which runs:
 
 ```text
 sync-scripts -> preflight -> prepare-env -> fetch-source -> prefetch-base -> merge -> validate-bf16
@@ -44,7 +44,7 @@ sync-scripts -> preflight -> prepare-env -> fetch-source -> prefetch-base -> mer
 For inspection without remote changes:
 
 ```bash
-../merge-quant-serve/scripts/run_stage.sh derive
+../shared/scripts/run_stage.sh derive
 ```
 
 The handoff artifact for the quant skill is `BF16_OUT`.

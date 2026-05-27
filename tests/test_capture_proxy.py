@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CAPTURE_PROXY_PATH = ROOT / "merge-quant-serve" / "scripts" / "capture_proxy.py"
+CAPTURE_PROXY_PATH = ROOT / "shared" / "scripts" / "capture_proxy.py"
 
 spec = importlib.util.spec_from_file_location("capture_proxy", CAPTURE_PROXY_PATH)
 assert spec is not None
