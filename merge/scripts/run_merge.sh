@@ -11,7 +11,7 @@ Usage: scripts/run_merge.sh [stage]
 
 Default stage: merge-all
 Common stages: derive resolve-source sync-scripts preflight prepare-env
-               fetch-source prefetch-base merge validate-bf16 merge-all
+               fetch-source prefetch-base merge validate-bf16 plan doctor merge-all
 EOF
   exit 0
 fi

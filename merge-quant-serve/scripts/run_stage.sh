@@ -12,7 +12,7 @@ Stages:
   derive resolve-source sync-scripts preflight prepare-env fetch-source
   prefetch-base merge validate-bf16 quantize stage-model write-serve-env
   serve-backend serve-proxy serve-observability serve-caddy smoke benchmark
-  merge-all quant-all serve-all deploy-all
+  plan doctor merge-all quant-all serve-all deploy-all
 
 Required env for remote stages:
   SSH_HOST and REMOTE_ROOT. Set OSS_URL or TINKER_URL for source/merge work.
@@ -127,13 +127,11 @@ derive() {
   fi
 
   local source_for_slug="${OSS_URL:-${TINKER_URL}}"
+  local explicit_artifact_for_slug="${BF16_OUT:-${FP8_OUT:-${LOCAL_MODEL_PATH:-${DURABLE_MODEL_PATH:-${MODEL_PATH:-}}}}}"
   if [[ -z "${RUN_SLUG:-}" ]]; then
-    if [[ -z "${source_for_slug}" ]]; then
-      echo "Set RUN_SLUG when resuming without OSS_URL or TINKER_URL" >&2
-      exit 2
-    fi
-    RUN_SLUG="$(
-      python3 - "${source_for_slug}" <<'PY'
+    if [[ -n "${source_for_slug}" ]]; then
+      RUN_SLUG="$(
+        python3 - "${source_for_slug}" <<'PY'
 from urllib.parse import urlparse, unquote
 import os
 import sys
@@ -146,10 +144,29 @@ for suffix in (".tar.gz", ".tgz", ".tar", ".zip", ".gz"):
         break
 print(name)
 PY
-    )"
+      )"
+    elif [[ -n "${explicit_artifact_for_slug}" ]]; then
+      RUN_SLUG="$(
+        python3 - "${explicit_artifact_for_slug}" <<'PY'
+import os
+import sys
+
+name = os.path.basename(sys.argv[1].rstrip("/")) or "resumed-artifact"
+for suffix in ("-merged-fp8-finegrained-block128", "-fp8-finegrained-block128", "-merged"):
+    if name.endswith(suffix):
+        name = name[: -len(suffix)]
+        break
+print(name or "resumed-artifact")
+PY
+      )"
+    else
+      echo "Set RUN_SLUG or an explicit artifact path when resuming without OSS_URL or TINKER_URL" >&2
+      exit 2
+    fi
     RUN_SLUG="$(printf "%s\n" "${RUN_SLUG}" | tr -cs "A-Za-z0-9._-" "-" | sed "s/^-//; s/-$//")"
   fi
 
+  local repo_root="${SKILL_DIR}/.."
   : "${ATOM_SOURCE_DIR:=${REMOTE_ROOT}/atom-fork}"
   : "${SCRATCH_ROOT:=${LOCAL_SCRATCH_MOUNT}/amd_profiling/${RUN_SLUG}}"
   : "${HF_CACHE_DIR:=${SCRATCH_ROOT}/hf-cache}"
@@ -165,9 +182,16 @@ PY
   : "${DURABLE_MODEL_PATH:=${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-finegrained-block128}"
   : "${MODEL_PATH:=${LOCAL_MODEL_PATH}}"
   : "${ENV_FILE:=${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_64k_seq2.env}"
+  : "${MERGE_STAGE_MANIFEST:=${BF16_OUT}/stage_manifest.json}"
+  : "${QUANT_STAGE_MANIFEST:=${FP8_OUT}/stage_manifest.json}"
+  : "${SERVE_STAGE_MANIFEST:=${ENV_FILE%.env}.stage_manifest.json}"
   : "${CONTAINER_NAME:=vllm-${RUN_SLUG}-atom}"
   : "${SERVED_MODEL_NAME:=${RUN_SLUG}-fp8-atom}"
   : "${VENV_PYTHON:=${REMOTE_ROOT}/venv-merge/bin/python}"
+  : "${REPO_COMMIT:=$(python3 "${SKILL_DIR}/scripts/stage_manifest.py" repo-commit --repo-root "${repo_root}")}"
+  : "${MERGE_STAGE_HASH:=$(python3 "${SKILL_DIR}/scripts/stage_manifest.py" hash-stage --repo-root "${repo_root}" --stage merge)}"
+  : "${QUANT_STAGE_HASH:=$(python3 "${SKILL_DIR}/scripts/stage_manifest.py" hash-stage --repo-root "${repo_root}" --stage quant)}"
+  : "${SERVE_STAGE_HASH:=$(python3 "${SKILL_DIR}/scripts/stage_manifest.py" hash-stage --repo-root "${repo_root}" --stage serve)}"
   PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
   if [[ -z "${PUBLIC_ROOT_URL}" && -n "${PUBLIC_BASE_URL}" ]]; then
     PUBLIC_ROOT_URL="${PUBLIC_BASE_URL%/v1}"
@@ -189,13 +213,15 @@ PY
   export DATA_DISK RUN_SLUG ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT
   export SCRATCH_ROOT HF_CACHE_DIR SERVE_HF_CACHE_DIR TMPDIR XDG_CACHE_HOME PIP_CACHE_DIR
   export OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH
-  export MODEL_PATH ENV_FILE CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON PREFETCH_WORKERS EXTRACT_WORKERS
+  export MODEL_PATH ENV_FILE MERGE_STAGE_MANIFEST QUANT_STAGE_MANIFEST SERVE_STAGE_MANIFEST
+  export CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON PREFETCH_WORKERS EXTRACT_WORKERS
+  export REPO_COMMIT MERGE_STAGE_HASH QUANT_STAGE_HASH SERVE_STAGE_HASH
   export PUBLIC_BASE_URL OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE PUBLIC_ROOT_URL
 }
 
 print_derived() {
   derive
-  for name in SSH_HOST REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR TMPDIR PIP_CACHE_DIR OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT DOCKER_IMAGE VLLM_EXPECTED_VERSION VLLM_TOOL_PARSER_PATCH_PR VLLM_TOOL_PARSER_PATCH_REF VLLM_TOOL_PARSER_PATCH_COMMIT TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT PUBLIC_BASE_URL PUBLIC_ROOT_URL OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE; do
+  for name in SSH_HOST REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR TMPDIR PIP_CACHE_DIR OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE MERGE_STAGE_MANIFEST QUANT_STAGE_MANIFEST SERVE_STAGE_MANIFEST REPO_COMMIT MERGE_STAGE_HASH QUANT_STAGE_HASH SERVE_STAGE_HASH ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT DOCKER_IMAGE VLLM_EXPECTED_VERSION VLLM_TOOL_PARSER_PATCH_PR VLLM_TOOL_PARSER_PATCH_REF VLLM_TOOL_PARSER_PATCH_COMMIT TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT PUBLIC_BASE_URL PUBLIC_ROOT_URL OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE; do
     printf "%s=%s\n" "${name}" "${!name:-}"
   done
 }
@@ -203,7 +229,7 @@ print_derived() {
 remote_exports() {
   derive
   local name
-  for name in REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR SERVE_HF_CACHE_DIR TMPDIR XDG_CACHE_HOME PIP_CACHE_DIR OSS_URL OSS_SHA256 BASE_REPO OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON DOCKER_IMAGE VLLM_EXPECTED_VERSION VLLM_TOOL_PARSER_PATCH_PR VLLM_TOOL_PARSER_PATCH_REF VLLM_TOOL_PARSER_PATCH_COMMIT TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT ROCM_TORCH_VERSION ROCM_TORCH_INDEX_URL ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT PREFETCH_WORKERS EXTRACT_WORKERS OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE PUBLIC_ROOT_URL SUDO_PASSWORD; do
+  for name in REMOTE_ROOT DATA_DISK LOCAL_SCRATCH_MOUNT RUN_SLUG SCRATCH_ROOT HF_CACHE_DIR SERVE_HF_CACHE_DIR TMPDIR XDG_CACHE_HOME PIP_CACHE_DIR OSS_URL OSS_SHA256 BASE_REPO OSS_WORK_DIR PEFT_ADAPTER BF16_OUT FP8_OUT LOCAL_MODEL_PATH DURABLE_MODEL_PATH MODEL_PATH ENV_FILE MERGE_STAGE_MANIFEST QUANT_STAGE_MANIFEST SERVE_STAGE_MANIFEST REPO_COMMIT MERGE_STAGE_HASH QUANT_STAGE_HASH SERVE_STAGE_HASH CONTAINER_NAME SERVED_MODEL_NAME VENV_PYTHON DOCKER_IMAGE VLLM_EXPECTED_VERSION VLLM_TOOL_PARSER_PATCH_PR VLLM_TOOL_PARSER_PATCH_REF VLLM_TOOL_PARSER_PATCH_COMMIT TENSOR_PARALLEL_SIZE MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION VLLM_ENABLE_MTP VLLM_SPECULATIVE_CONFIG VLLM_EXTRA_ARGS FORCE_TEMPERATURE DEFAULT_MAX_TOKENS NORMALIZE_TOOL_CALL_ARGUMENTS DISABLE_THINKING MERGE_DEVICES QUANT_DEVICES MERGE_JOBS QUANT_WORKERS EXPECTED_GPU_COUNT ROCM_TORCH_VERSION ROCM_TORCH_INDEX_URL ATOM_SOURCE_DIR ATOM_REPO_URL ATOM_BRANCH ATOM_PROD_COMMIT PREFETCH_WORKERS EXTRACT_WORKERS OBSERVABILITY_ENABLED PROMETHEUS_IMAGE GRAFANA_IMAGE CADDY_IMAGE PUBLIC_ROOT_URL SUDO_PASSWORD; do
     printf "export %s=%s\n" "${name}" "$(shell_quote "${!name:-}")"
   done
 }
@@ -366,12 +392,34 @@ export HF_HOME="$HF_CACHE_DIR" HF_HUB_CACHE="$HF_CACHE_DIR/hub" TRANSFORMERS_CAC
     remote_stage '
 set -euo pipefail
 "$VENV_PYTHON" "$REMOTE_ROOT/scripts/validate_and_repair_safetensors_shards.py" --model "$BF16_OUT" --cache-dir "$HF_CACHE_DIR" --repair-dangling-links --remove-temp-artifacts
+python3 "$REMOTE_ROOT/scripts/stage_manifest.py" write \
+  --path "$MERGE_STAGE_MANIFEST" \
+  --stage merge \
+  --stage-hash "$MERGE_STAGE_HASH" \
+  --repo-commit "$REPO_COMMIT" \
+  --artifact-path "$BF16_OUT" \
+  --input "base_repo=$BASE_REPO" \
+  --input "oss_sha256=$OSS_SHA256" \
+  --param "merge_devices=$MERGE_DEVICES" \
+  --param "merge_jobs=$MERGE_JOBS"
 '
     ;;
   quantize)
     remote_stage '
 set -euo pipefail
 "$VENV_PYTHON" "$REMOTE_ROOT/scripts/quantize_glm51_fp8_block128.py" --base-model-path "$BF16_OUT" --export-dir "$FP8_OUT" --cache-dir "$HF_CACHE_DIR" --devices "$QUANT_DEVICES" --workers "$QUANT_WORKERS" --trust-remote-code
+python3 "$REMOTE_ROOT/scripts/stage_manifest.py" write \
+  --path "$QUANT_STAGE_MANIFEST" \
+  --stage quant \
+  --stage-hash "$QUANT_STAGE_HASH" \
+  --repo-commit "$REPO_COMMIT" \
+  --input-manifest "$MERGE_STAGE_MANIFEST" \
+  --artifact-path "$FP8_OUT" \
+  --input "bf16_out=$BF16_OUT" \
+  --param "quant_devices=$QUANT_DEVICES" \
+  --param "quant_workers=$QUANT_WORKERS" \
+  --param "atom_prod_commit=$ATOM_PROD_COMMIT" \
+  --param "rocm_torch_version=$ROCM_TORCH_VERSION"
 '
     ;;
   stage-model)
@@ -436,6 +484,26 @@ GRAFANA_ROOT_URL=${PUBLIC_ROOT_URL%/}/grafana/
 PROMETHEUS_EXTERNAL_URL=${PUBLIC_ROOT_URL%/}/prometheus/
 SKILL_OBSERVABILITY_ROOT=$REMOTE_ROOT/observability-skill
 EOF
+python3 "$REMOTE_ROOT/scripts/stage_manifest.py" write \
+  --path "$SERVE_STAGE_MANIFEST" \
+  --stage serve \
+  --stage-hash "$SERVE_STAGE_HASH" \
+  --repo-commit "$REPO_COMMIT" \
+  --input-manifest "$MODEL_PATH/stage_manifest.json" \
+  --artifact-path "$MODEL_PATH" \
+  --input "model_path=$MODEL_PATH" \
+  --param "docker_image=$DOCKER_IMAGE" \
+  --param "atom_prod_commit=$ATOM_PROD_COMMIT" \
+  --param "vllm_expected_version=$VLLM_EXPECTED_VERSION" \
+  --param "vllm_tool_parser_patch_commit=$VLLM_TOOL_PARSER_PATCH_COMMIT" \
+  --param "tensor_parallel_size=$TENSOR_PARALLEL_SIZE" \
+  --param "max_model_len=$MAX_MODEL_LEN" \
+  --param "max_num_seqs=$MAX_NUM_SEQS" \
+  --param "max_num_batched_tokens=$MAX_NUM_BATCHED_TOKENS" \
+  --param "gpu_memory_utilization=$GPU_MEMORY_UTILIZATION" \
+  --param "vllm_enable_mtp=$VLLM_ENABLE_MTP" \
+  --param "vllm_speculative_config=$VLLM_SPECULATIVE_CONFIG" \
+  --param "vllm_extra_args=$VLLM_EXTRA_ARGS"
 '
     ;;
   serve-backend)
@@ -462,6 +530,41 @@ ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_
     ;;
   benchmark)
     remote_stage 'ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/benchmark_vllm_glm51.sh"'
+    ;;
+  plan|doctor)
+    sync_scripts
+    remote_stage '
+set -euo pipefail
+plan_quant_manifest="$QUANT_STAGE_MANIFEST"
+if [ ! -f "$plan_quant_manifest" ] && [ -f "$MODEL_PATH/stage_manifest.json" ]; then
+  plan_quant_manifest="$MODEL_PATH/stage_manifest.json"
+fi
+python3 "$REMOTE_ROOT/scripts/stage_manifest.py" plan \
+  --merge-manifest "$MERGE_STAGE_MANIFEST" \
+  --quant-manifest "$plan_quant_manifest" \
+  --serve-manifest "$SERVE_STAGE_MANIFEST" \
+  --merge-stage-hash "$MERGE_STAGE_HASH" \
+  --quant-stage-hash "$QUANT_STAGE_HASH" \
+  --serve-stage-hash "$SERVE_STAGE_HASH" \
+  --merge-param "merge_devices=$MERGE_DEVICES" \
+  --merge-param "merge_jobs=$MERGE_JOBS" \
+  --quant-param "quant_devices=$QUANT_DEVICES" \
+  --quant-param "quant_workers=$QUANT_WORKERS" \
+  --quant-param "atom_prod_commit=$ATOM_PROD_COMMIT" \
+  --quant-param "rocm_torch_version=$ROCM_TORCH_VERSION" \
+  --serve-param "docker_image=$DOCKER_IMAGE" \
+  --serve-param "atom_prod_commit=$ATOM_PROD_COMMIT" \
+  --serve-param "vllm_expected_version=$VLLM_EXPECTED_VERSION" \
+  --serve-param "vllm_tool_parser_patch_commit=$VLLM_TOOL_PARSER_PATCH_COMMIT" \
+  --serve-param "tensor_parallel_size=$TENSOR_PARALLEL_SIZE" \
+  --serve-param "max_model_len=$MAX_MODEL_LEN" \
+  --serve-param "max_num_seqs=$MAX_NUM_SEQS" \
+  --serve-param "max_num_batched_tokens=$MAX_NUM_BATCHED_TOKENS" \
+  --serve-param "gpu_memory_utilization=$GPU_MEMORY_UTILIZATION" \
+  --serve-param "vllm_enable_mtp=$VLLM_ENABLE_MTP" \
+  --serve-param "vllm_speculative_config=$VLLM_SPECULATIVE_CONFIG" \
+  --serve-param "vllm_extra_args=$VLLM_EXTRA_ARGS"
+'
     ;;
   merge-all)
     for next_stage in sync-scripts preflight prepare-env fetch-source prefetch-base merge validate-bf16; do

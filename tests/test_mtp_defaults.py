@@ -87,6 +87,7 @@ def test_run_stage_can_resume_with_run_slug_without_source_url():
 
 def test_run_stage_preserves_explicit_artifact_paths():
     derived = run_stage_derive(
+        OSS_URL="",
         BF16_OUT="/artifacts/bf16",
         FP8_OUT="/artifacts/fp8",
         LOCAL_MODEL_PATH="/artifacts/local-fp8",
@@ -99,6 +100,20 @@ def test_run_stage_preserves_explicit_artifact_paths():
     assert derived["LOCAL_MODEL_PATH"] == "/artifacts/local-fp8"
     assert derived["DURABLE_MODEL_PATH"] == "/artifacts/durable-fp8"
     assert derived["MODEL_PATH"] == "/artifacts/served-fp8"
+
+
+def test_run_stage_can_resume_from_each_explicit_artifact_path_without_source_url():
+    for name in (
+        "BF16_OUT",
+        "FP8_OUT",
+        "LOCAL_MODEL_PATH",
+        "DURABLE_MODEL_PATH",
+        "MODEL_PATH",
+    ):
+        derived = run_stage_derive(OSS_URL="", **{name: f"/artifacts/{name.lower()}"})
+
+        assert derived[name] == f"/artifacts/{name.lower()}"
+        assert derived["RUN_SLUG"] == name.lower()
 
 
 def test_run_stage_does_not_force_temperature_by_default():

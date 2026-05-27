@@ -11,7 +11,7 @@ Usage: scripts/run_serve.sh [stage]
 
 Default stage: serve-all
 Common stages: derive sync-scripts write-serve-env serve-backend serve-proxy
-               serve-observability serve-caddy smoke benchmark serve-all
+               serve-observability serve-caddy smoke benchmark plan doctor serve-all
 EOF
   exit 0
 fi

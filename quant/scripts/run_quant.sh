@@ -10,7 +10,8 @@ if [[ "${STAGE}" == "-h" || "${STAGE}" == "--help" ]]; then
 Usage: scripts/run_quant.sh [stage]
 
 Default stage: quant-all
-Common stages: derive sync-scripts preflight prepare-env quantize stage-model quant-all
+Common stages: derive sync-scripts preflight prepare-env quantize stage-model
+               plan doctor quant-all
 EOF
   exit 0
 fi

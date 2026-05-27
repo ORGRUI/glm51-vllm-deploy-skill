@@ -21,3 +21,17 @@ cd ../serve && ./scripts/run_serve.sh
 Set `RUN_SLUG` to reuse the default intermediate paths, or set `BF16_OUT`,
 `FP8_OUT`, `LOCAL_MODEL_PATH`, `DURABLE_MODEL_PATH`, and `MODEL_PATH`
 explicitly when reusing artifacts from a previous run.
+
+Each completed stage writes a compact `stage_manifest.json` beside its reusable
+artifact, plus a serve manifest next to the generated env file. The manifest
+records the repo commit for traceability and the stage-specific hash used for
+reuse decisions. Use `plan` or `doctor` to compare the current merge / quant /
+serve fingerprints and parameters against existing manifests:
+
+```bash
+./merge-quant-serve/scripts/run_stage.sh plan
+```
+
+The decision is conservative: missing manifests, changed stage hashes, changed
+upstream manifest hashes, or changed relevant parameters rerun from the earliest
+uncertain stage.
