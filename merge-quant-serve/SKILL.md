@@ -1,6 +1,6 @@
 ---
 name: merge-quant-serve
-description: Deploy a GLM-5.1 LoRA from a Tinker checkpoint URL or signed OSS archive by resolving the source, preparing PEFT, merging BF16 shards, quantizing with Transformers FineGrainedFP8 block-128 plus explicit MoE expert rewrite, and serving through vLLM + ATOM with capture proxy and Caddy. Use when asked for merge/quant/serve, GLM-5.1 FP8 block-128 deployment, OPE-13 attachment-style quantization, or one-command staged deployment.
+description: Compatibility umbrella for the GLM-5.1 merge, quant, and serve pipeline. Use when asked for a full one-command deployment or for the underlying shared stage runner; prefer the stage-specific merge/, quant/, and serve/ skills when only one part changed.
 ---
 
 # Merge Quant Serve
@@ -28,6 +28,16 @@ export LOCAL_SCRATCH_MOUNT=/local_nvme
 export PUBLIC_BASE_URL=http://<ip>:7777/v1
 export OSS_URL='<signed-or-public-http-archive>'
 # or: export TINKER_URL='tinker://...'
+```
+
+When resuming from quant or serve without the original source URL, set `RUN_SLUG`
+or explicit artifact paths instead:
+
+```bash
+export RUN_SLUG=<stable-run-name>
+export BF16_OUT=/local_nvme/amd_profiling/<run>/models/<run>-merged
+export FP8_OUT=/local_nvme/amd_profiling/<run>/models/<run>-merged-fp8-finegrained-block128
+export MODEL_PATH=/local_nvme/amd_profiling/<run>/serve/<run>-merged-fp8-finegrained-block128
 ```
 
 Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.1`, `DOCKER_IMAGE=rocm/atom-dev:vllm-latest`, TP=8, 64k context, seq2, batch tokens 65536, GPU memory utilization 0.60, `--async-scheduling`, `FULL_AND_PIECEWISE`, prefix caching enabled, MTP enabled with `--speculative-config={"method":"mtp","num_speculative_tokens":1}`, merge untouched shards as symlinks, merge on `cuda:0..cuda:7` with `MERGE_JOBS=8`, quantization on `cuda:0..cuda:7` with `QUANT_WORKERS=8`, capture proxy `max_tokens=8192` when omitted, no default temperature override, request-side `chat_template_kwargs.enable_thinking=false` when omitted, and single-port observability enabled by default.
@@ -79,6 +89,14 @@ From this skill directory:
 ./scripts/run_stage.sh benchmark
 ```
 
+Stage-group entrypoints:
+
+```bash
+./scripts/run_stage.sh merge-all
+./scripts/run_stage.sh quant-all
+./scripts/run_stage.sh serve-all
+```
+
 For a full run after confirmation:
 
 ```bash
@@ -86,6 +104,12 @@ For a full run after confirmation:
 ```
 
 If only `TINKER_URL` is set, `deploy-all` resolves it first and exports the resolved `OSS_URL` for later stages.
+
+For independent versioning and cleaner resumes, prefer the split skills:
+
+- `../merge/`: source resolution through reusable BF16 `BF16_OUT`.
+- `../quant/`: `BF16_OUT` through reusable FP8 `FP8_OUT` and staged `LOCAL_MODEL_PATH`.
+- `../serve/`: `MODEL_PATH` through runtime restart and smoke checks.
 
 Treat `serve-backend -> serve-proxy -> serve-observability -> serve-caddy -> smoke` as the standard service restart sequence. `serve-backend` only replaces the vLLM backend container; `serve-observability` starts Prometheus and Grafana bound to localhost; `serve-caddy` always restarts the public `:7777` Caddy container so a runtime restart leaves the public endpoint in the expected state.
 
