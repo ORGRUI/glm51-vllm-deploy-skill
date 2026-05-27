@@ -34,6 +34,24 @@ Useful defaults are built into `scripts/run_stage.sh`: `BASE_REPO=zai-org/GLM-5.
 
 MTP defaults are controlled by `VLLM_ENABLE_MTP=1` and `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`. Set `VLLM_ENABLE_MTP=0` to keep the standard serve defaults but omit MTP, or set `VLLM_EXTRA_ARGS` explicitly to fully override the generated vLLM extra args.
 
+## Pinned Runtime Versions
+
+The verified MTP runtime is pinned by default and must be preserved in deployment summaries:
+
+- vLLM package: `0.19.1rc1.dev90+g5af684c31`.
+- vLLM GLM tool parser patch: PR 39253, `[Bugfix] Fix GLM tool parser streaming with MTP or stream interval`, `refs/pull/39253/head`, commit `920af3c7a1b29847fb237fa9a9aaedacf48e8bbd`.
+- ATOM repo: `https://github.com/san-tian/ATOM.git`, branch `fix/mtp-arange-buffer-token-capacity`, commit `d5f9a49bb2b6f3e82fda35e411d3cd962c19bf15`.
+
+Install and patch order:
+
+1. Start from the serving image `rocm/atom-dev:vllm-latest`.
+2. Ensure the image contains vLLM `0.19.1rc1.dev90+g5af684c31`.
+3. Apply vLLM PR 39253's GLM tool parser patch on top of that vLLM package.
+4. Clone ATOM from `https://github.com/san-tian/ATOM.git`, fetch `fix/mtp-arange-buffer-token-capacity`, and checkout `d5f9a49bb2b6f3e82fda35e411d3cd962c19bf15`.
+5. Write the serve env with `VLLM_SOURCE_DIR=$ATOM_SOURCE_DIR`, MTP enabled, and the speculative config above.
+
+`scripts/run_stage.sh write-serve-env` records `VLLM_EXPECTED_VERSION`, `VLLM_TOOL_PARSER_PATCH_PR`, `VLLM_TOOL_PARSER_PATCH_REF`, and `VLLM_TOOL_PARSER_PATCH_COMMIT`. `scripts/serve_vllm_glm51.sh` writes those values into `*.server_argv.json` and, before starting `vllm serve`, fails fast if the container vLLM version does not match or the PR 39253 parser marker is absent.
+
 ## One-Command Stages
 
 From this skill directory:

@@ -14,6 +14,10 @@ fi
 ROOT="${AMD_PROFILING_ROOT:-${ROOT}}"
 
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai-rocm:latest}"
+EXPECTED_VLLM_VERSION="${VLLM_EXPECTED_VERSION:-}"
+TOOL_PARSER_PATCH_PR="${VLLM_TOOL_PARSER_PATCH_PR:-}"
+TOOL_PARSER_PATCH_REF="${VLLM_TOOL_PARSER_PATCH_REF:-}"
+TOOL_PARSER_PATCH_COMMIT="${VLLM_TOOL_PARSER_PATCH_COMMIT:-}"
 MODEL="${VLLM_MODEL:-/data/sft_aug_v1_from_0429_retry10_state_r16_no_unembed_32k_lr1e5_batch32_20260501_075124_final_fp8}"
 TP="${VLLM_TP:-8}"
 DTYPE="${VLLM_DTYPE:-bfloat16}"
@@ -192,6 +196,10 @@ fi
 VLLM_ARGV_TIMESTAMP="${timestamp}" \
 VLLM_ARGV_ENV_FILE="${ENV_FILE}" \
 VLLM_ARGV_IMAGE="${IMAGE}" \
+VLLM_ARGV_EXPECTED_VERSION="${EXPECTED_VLLM_VERSION}" \
+VLLM_ARGV_TOOL_PARSER_PATCH_PR="${TOOL_PARSER_PATCH_PR}" \
+VLLM_ARGV_TOOL_PARSER_PATCH_REF="${TOOL_PARSER_PATCH_REF}" \
+VLLM_ARGV_TOOL_PARSER_PATCH_COMMIT="${TOOL_PARSER_PATCH_COMMIT}" \
 VLLM_ARGV_CONTAINER_NAME="${CONTAINER_NAME}" \
 VLLM_ARGV_MODEL="${MODEL}" \
 VLLM_ARGV_TP="${TP}" \
@@ -249,6 +257,10 @@ data = {
     "timestamp_utc": os.environ["VLLM_ARGV_TIMESTAMP"],
     "env_file": os.environ["VLLM_ARGV_ENV_FILE"],
     "image": os.environ["VLLM_ARGV_IMAGE"],
+    "expected_vllm_version": os.environ["VLLM_ARGV_EXPECTED_VERSION"],
+    "tool_parser_patch_pr": os.environ["VLLM_ARGV_TOOL_PARSER_PATCH_PR"],
+    "tool_parser_patch_ref": os.environ["VLLM_ARGV_TOOL_PARSER_PATCH_REF"],
+    "tool_parser_patch_commit": os.environ["VLLM_ARGV_TOOL_PARSER_PATCH_COMMIT"],
     "container_name": os.environ["VLLM_ARGV_CONTAINER_NAME"],
     "model": os.environ["VLLM_ARGV_MODEL"],
     "tensor_parallel": os.environ["VLLM_ARGV_TP"],
@@ -303,6 +315,18 @@ PY
   printf '  -e HF_HUB_CACHE=%q \\\n' "${HF_HUB_CACHE}"
   printf '  -e TRANSFORMERS_CACHE=%q \\\n' "${TRANSFORMERS_CACHE}"
   printf '  -e VLLM_TARGET_DEVICE=%q \\\n' "${VLLM_TARGET_DEVICE}"
+  if [[ -n "${EXPECTED_VLLM_VERSION}" ]]; then
+    printf '  -e VLLM_EXPECTED_VERSION=%q \\\n' "${EXPECTED_VLLM_VERSION}"
+  fi
+  if [[ -n "${TOOL_PARSER_PATCH_PR}" ]]; then
+    printf '  -e VLLM_TOOL_PARSER_PATCH_PR=%q \\\n' "${TOOL_PARSER_PATCH_PR}"
+  fi
+  if [[ -n "${TOOL_PARSER_PATCH_REF}" ]]; then
+    printf '  -e VLLM_TOOL_PARSER_PATCH_REF=%q \\\n' "${TOOL_PARSER_PATCH_REF}"
+  fi
+  if [[ -n "${TOOL_PARSER_PATCH_COMMIT}" ]]; then
+    printf '  -e VLLM_TOOL_PARSER_PATCH_COMMIT=%q \\\n' "${TOOL_PARSER_PATCH_COMMIT}"
+  fi
   if [[ -n "${pythonpath_arg}" ]]; then
     printf '  -e PYTHONPATH=%q \\\n' "${pythonpath_arg}"
     printf '  -e ATOM_SOURCE_DIR=%q \\\n' "${atom_source_arg}"
@@ -327,6 +351,31 @@ PY
   fi
   printf '  -v %q:%q \\\n' "${ROOT}" "${ROOT}"
   printf '  %q \\\n' "${IMAGE}"
+  if [[ -n "${EXPECTED_VLLM_VERSION}" || -n "${TOOL_PARSER_PATCH_COMMIT}" ]]; then
+    read -r -d '' runtime_check <<'EOF' || true
+python3 - <<'PY'
+import importlib
+from importlib.metadata import version
+import os
+import sys
+
+expected = os.environ.get("VLLM_EXPECTED_VERSION")
+if expected:
+    actual = version("vllm")
+    if actual != expected:
+        print(f"ERROR: vLLM version {actual!r} != expected {expected!r}", file=sys.stderr)
+        sys.exit(13)
+
+if os.environ.get("VLLM_TOOL_PARSER_PATCH_COMMIT"):
+    parser = importlib.import_module("vllm.tool_parsers.glm4_moe_tool_parser")
+    if not hasattr(parser, "_partial_tag_overlap"):
+        print("ERROR: GLM tool parser patch PR 39253 marker missing", file=sys.stderr)
+        sys.exit(14)
+PY
+exec "$@"
+EOF
+    printf '  bash -lc %q bash \\\n' "${runtime_check}"
+  fi
   printf '  %q' "${server_cmd[@]}"
   echo
 } >"${cmd_file}"
