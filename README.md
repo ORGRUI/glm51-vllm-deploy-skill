@@ -7,6 +7,7 @@ pipeline:
 - `quant/`: consumes `BF16_OUT`, writes the FP8 block-128 artifact, and stages it as `LOCAL_MODEL_PATH` / `DURABLE_MODEL_PATH`.
 - `serve/`: consumes `MODEL_PATH`, writes the vLLM + ATOM serve env, restarts backend/proxy/observability/Caddy, and runs smoke tests.
 - `merge-quant-serve/`: compatibility umbrella for the full pipeline and all underlying one-command stages.
+- `ajith-vllm-recipe/`: recipe-first GLM-5.1 FP8 serve reference based on Ajith's `amd_glm5_support` recipe, plus the exact override points when using this repo's merge/quant/proxy pipeline.
 - `azure-amd-deploy-env/`: self-contained Azure AMD MI300X deployment environment constraints, command skeletons, and judgment standards for durable/ephemeral disk policy and local NVMe setup.
 
 Each skill has its own `SKILL.md`. The stage skills provide clear resume
@@ -16,6 +17,7 @@ entrypoints:
 cd merge && ./scripts/run_merge.sh
 cd ../quant && ./scripts/run_quant.sh
 cd ../serve && ./scripts/run_serve.sh
+cd ../ajith-vllm-recipe && cat SKILL.md
 ```
 
 Set `RUN_SLUG` to reuse the default intermediate paths, or set `BF16_OUT`,

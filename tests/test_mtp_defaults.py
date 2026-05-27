@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUN_STAGE = ROOT / "merge-quant-serve" / "scripts" / "run_stage.sh"
 SERVE_VLLM = ROOT / "merge-quant-serve" / "scripts" / "serve_vllm_glm51.sh"
-DEFAULT_SPEC_CONFIG = '{"method":"mtp","num_speculative_tokens":1}'
+DEFAULT_SPEC_CONFIG = '{"method":"mtp","num_speculative_tokens":3}'
 EXPECTED_VLLM_VERSION = "0.19.1rc1.dev90+g5af684c31"
 TOOL_PARSER_PATCH_PR = "https://github.com/vllm-project/vllm/pull/39253"
 TOOL_PARSER_PATCH_REF = "refs/pull/39253/head"
@@ -42,6 +42,10 @@ def test_run_stage_defaults_mtp_on():
 
     assert derived["VLLM_ENABLE_MTP"] == "1"
     assert derived["VLLM_SPECULATIVE_CONFIG"] == DEFAULT_SPEC_CONFIG
+    assert derived["VLLM_ROCM_USE_AITER"] == "1"
+    assert derived["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] == "INT4"
+    assert derived["VLLM_ROCM_USE_AITER_RMSNORM"] == "0"
+    assert "--block-size=1" in derived["VLLM_EXTRA_ARGS"]
     assert f"--speculative-config={DEFAULT_SPEC_CONFIG}" in derived["VLLM_EXTRA_ARGS"]
 
 
@@ -157,8 +161,12 @@ def test_serve_dry_run_records_default_mtp_argv(tmp_path: Path):
     assert data["host"] == "127.0.0.1"
     assert data["enable_mtp"] == "1"
     assert data["speculative_config"] == DEFAULT_SPEC_CONFIG
+    assert data["rocm_use_aiter"] == "1"
+    assert data["rocm_quick_reduce_quantization"] == "INT4"
+    assert data["rocm_use_aiter_rmsnorm"] == "0"
     assert data["expected_vllm_version"] == EXPECTED_VLLM_VERSION
     assert data["tool_parser_patch_pr"] == TOOL_PARSER_PATCH_PR
     assert data["tool_parser_patch_ref"] == TOOL_PARSER_PATCH_REF
     assert data["tool_parser_patch_commit"] == TOOL_PARSER_PATCH_COMMIT
+    assert "--block-size=1" in data["server_argv"]
     assert f"--speculative-config={DEFAULT_SPEC_CONFIG}" in data["server_argv"]

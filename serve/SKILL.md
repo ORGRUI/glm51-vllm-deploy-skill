@@ -42,3 +42,29 @@ sync-scripts -> write-serve-env -> serve-backend -> serve-proxy -> serve-observa
 ```
 
 For runtime-only changes, rerun `./scripts/run_serve.sh` with the same `RUN_SLUG` and `MODEL_PATH`.
+
+## Ajith GLM-5.1 Recipe Defaults
+
+The serve wrapper now carries the AMD recipe runtime knobs by default:
+
+```bash
+export VLLM_ROCM_USE_AITER=1
+export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+export VLLM_ROCM_USE_AITER_RMSNORM=0
+export VLLM_ENABLE_MTP=1
+export VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":3}'
+```
+
+Unless `VLLM_EXTRA_ARGS` is explicitly set, generated vLLM argv includes:
+
+```bash
+--async-scheduling \
+--compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"} \
+--enable-prefix-caching \
+--block-size=1 \
+--speculative-config={"method":"mtp","num_speculative_tokens":3}
+```
+
+This keeps the recipe-required `--tool-call-parser glm47`, `--reasoning-parser glm45`,
+`--enable-auto-tool-choice`, and `--chat-template-content-format string` defaults
+already present in the wrapper.
