@@ -70,6 +70,37 @@ def test_run_stage_defaults_pinned_runtime_versions():
     assert derived["ATOM_PROD_COMMIT"] == ATOM_COMMIT
 
 
+def test_run_stage_can_resume_with_run_slug_without_source_url():
+    derived = run_stage_derive(OSS_URL="", RUN_SLUG="existing-model")
+
+    assert derived["RUN_SLUG"] == "existing-model"
+    assert (
+        derived["BF16_OUT"]
+        == "/local_nvme/amd_profiling/existing-model/models/existing-model-merged"
+    )
+    assert (
+        derived["FP8_OUT"]
+        == "/local_nvme/amd_profiling/existing-model/models/existing-model-merged-fp8-finegrained-block128"
+    )
+    assert derived["MODEL_PATH"] == derived["LOCAL_MODEL_PATH"]
+
+
+def test_run_stage_preserves_explicit_artifact_paths():
+    derived = run_stage_derive(
+        BF16_OUT="/artifacts/bf16",
+        FP8_OUT="/artifacts/fp8",
+        LOCAL_MODEL_PATH="/artifacts/local-fp8",
+        DURABLE_MODEL_PATH="/artifacts/durable-fp8",
+        MODEL_PATH="/artifacts/served-fp8",
+    )
+
+    assert derived["BF16_OUT"] == "/artifacts/bf16"
+    assert derived["FP8_OUT"] == "/artifacts/fp8"
+    assert derived["LOCAL_MODEL_PATH"] == "/artifacts/local-fp8"
+    assert derived["DURABLE_MODEL_PATH"] == "/artifacts/durable-fp8"
+    assert derived["MODEL_PATH"] == "/artifacts/served-fp8"
+
+
 def test_run_stage_does_not_force_temperature_by_default():
     derived = run_stage_derive()
 

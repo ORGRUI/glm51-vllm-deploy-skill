@@ -11,10 +11,12 @@ Usage: scripts/run_stage.sh <stage>
 Stages:
   derive resolve-source sync-scripts preflight prepare-env fetch-source
   prefetch-base merge validate-bf16 quantize stage-model write-serve-env
-  serve-backend serve-proxy serve-observability serve-caddy smoke benchmark deploy-all
+  serve-backend serve-proxy serve-observability serve-caddy smoke benchmark
+  merge-all quant-all serve-all deploy-all
 
 Required env for remote stages:
-  SSH_HOST, REMOTE_ROOT, and either OSS_URL or TINKER_URL.
+  SSH_HOST and REMOTE_ROOT. Set OSS_URL or TINKER_URL for source/merge work.
+  For quant/serve resume without a source URL, set RUN_SLUG or explicit artifact paths.
 Optional:
   SSH_PASSWORD for sshpass, LOCAL_SCRATCH_MOUNT, PUBLIC_BASE_URL,
   BASE_REPO, DOCKER_IMAGE, ATOM_SOURCE_DIR, ATOM_PROD_COMMIT,
@@ -119,10 +121,6 @@ derive() {
   : "${SUDO_PASSWORD:=}"
 
   require REMOTE_ROOT
-  if [[ -z "${OSS_URL}" && -z "${TINKER_URL}" ]]; then
-    echo "Set OSS_URL or TINKER_URL" >&2
-    exit 2
-  fi
 
   if [[ -z "${DATA_DISK:-}" ]]; then
     DATA_DISK="/$(printf "%s\n" "${REMOTE_ROOT}" | cut -d/ -f2)"
@@ -130,6 +128,10 @@ derive() {
 
   local source_for_slug="${OSS_URL:-${TINKER_URL}}"
   if [[ -z "${RUN_SLUG:-}" ]]; then
+    if [[ -z "${source_for_slug}" ]]; then
+      echo "Set RUN_SLUG when resuming without OSS_URL or TINKER_URL" >&2
+      exit 2
+    fi
     RUN_SLUG="$(
       python3 - "${source_for_slug}" <<'PY'
 from urllib.parse import urlparse, unquote
@@ -149,23 +151,23 @@ PY
   fi
 
   : "${ATOM_SOURCE_DIR:=${REMOTE_ROOT}/atom-fork}"
-  SCRATCH_ROOT="${LOCAL_SCRATCH_MOUNT}/amd_profiling/${RUN_SLUG}"
-  HF_CACHE_DIR="${SCRATCH_ROOT}/hf-cache"
-  SERVE_HF_CACHE_DIR="${HF_CACHE_DIR}"
-  TMPDIR="${SCRATCH_ROOT}/tmp"
-  XDG_CACHE_HOME="${SCRATCH_ROOT}/xdg-cache"
-  PIP_CACHE_DIR="${REMOTE_ROOT}/pip-cache"
-  OSS_WORK_DIR="${SCRATCH_ROOT}/downloads/${RUN_SLUG}"
-  PEFT_ADAPTER="${SCRATCH_ROOT}/adapters/${RUN_SLUG}-peft"
-  BF16_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged"
-  FP8_OUT="${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-finegrained-block128"
-  LOCAL_MODEL_PATH="${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-finegrained-block128"
-  DURABLE_MODEL_PATH="${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-finegrained-block128"
-  MODEL_PATH="${LOCAL_MODEL_PATH}"
-  ENV_FILE="${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_64k_seq2.env"
-  CONTAINER_NAME="vllm-${RUN_SLUG}-atom"
-  SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-${RUN_SLUG}-fp8-atom}"
-  VENV_PYTHON="${VENV_PYTHON:-${REMOTE_ROOT}/venv-merge/bin/python}"
+  : "${SCRATCH_ROOT:=${LOCAL_SCRATCH_MOUNT}/amd_profiling/${RUN_SLUG}}"
+  : "${HF_CACHE_DIR:=${SCRATCH_ROOT}/hf-cache}"
+  : "${SERVE_HF_CACHE_DIR:=${HF_CACHE_DIR}}"
+  : "${TMPDIR:=${SCRATCH_ROOT}/tmp}"
+  : "${XDG_CACHE_HOME:=${SCRATCH_ROOT}/xdg-cache}"
+  : "${PIP_CACHE_DIR:=${REMOTE_ROOT}/pip-cache}"
+  : "${OSS_WORK_DIR:=${SCRATCH_ROOT}/downloads/${RUN_SLUG}}"
+  : "${PEFT_ADAPTER:=${SCRATCH_ROOT}/adapters/${RUN_SLUG}-peft}"
+  : "${BF16_OUT:=${SCRATCH_ROOT}/models/${RUN_SLUG}-merged}"
+  : "${FP8_OUT:=${SCRATCH_ROOT}/models/${RUN_SLUG}-merged-fp8-finegrained-block128}"
+  : "${LOCAL_MODEL_PATH:=${SCRATCH_ROOT}/serve/${RUN_SLUG}-merged-fp8-finegrained-block128}"
+  : "${DURABLE_MODEL_PATH:=${REMOTE_ROOT}/models/${RUN_SLUG}-merged-fp8-finegrained-block128}"
+  : "${MODEL_PATH:=${LOCAL_MODEL_PATH}}"
+  : "${ENV_FILE:=${REMOTE_ROOT}/configs/vllm_${RUN_SLUG}_atom_64k_seq2.env}"
+  : "${CONTAINER_NAME:=vllm-${RUN_SLUG}-atom}"
+  : "${SERVED_MODEL_NAME:=${RUN_SLUG}-fp8-atom}"
+  : "${VENV_PYTHON:=${REMOTE_ROOT}/venv-merge/bin/python}"
   PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
   if [[ -z "${PUBLIC_ROOT_URL}" && -n "${PUBLIC_BASE_URL}" ]]; then
     PUBLIC_ROOT_URL="${PUBLIC_BASE_URL%/v1}"
@@ -211,7 +213,7 @@ resolve_source() {
   local out_json="${SOURCE_RESOLUTION_JSON:-/tmp/source_resolution_${RUN_SLUG}.json}"
   if [[ -n "${OSS_URL}" ]]; then
     python3 "${SKILL_DIR}/scripts/resolve_model_source.py" --oss-url "${OSS_URL}" --output-json "${out_json}"
-  else
+  elif [[ -n "${TINKER_URL}" ]]; then
     python3 "${SKILL_DIR}/scripts/resolve_model_source.py" \
       --tinker-url "${TINKER_URL}" \
       --gpu-lease-base-url "${GPU_LEASE_BASE_URL}" \
@@ -220,6 +222,9 @@ resolve_source() {
       --poll-interval "${TRANSFER_POLL_INTERVAL}" \
       --timeout "${TRANSFER_TIMEOUT_SECONDS}" \
       --output-json "${out_json}"
+  else
+    echo "Set OSS_URL or TINKER_URL before resolve-source" >&2
+    exit 2
   fi
 }
 
@@ -457,6 +462,21 @@ ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/serve_
     ;;
   benchmark)
     remote_stage 'ATOM_ENV_FILE="$ENV_FILE" VLLM_ENV_FILE="$ENV_FILE" "$REMOTE_ROOT/scripts/benchmark_vllm_glm51.sh"'
+    ;;
+  merge-all)
+    for next_stage in sync-scripts preflight prepare-env fetch-source prefetch-base merge validate-bf16; do
+      "${BASH_SOURCE[0]}" "${next_stage}"
+    done
+    ;;
+  quant-all)
+    for next_stage in sync-scripts preflight prepare-env quantize stage-model; do
+      "${BASH_SOURCE[0]}" "${next_stage}"
+    done
+    ;;
+  serve-all)
+    for next_stage in sync-scripts write-serve-env serve-backend serve-proxy serve-observability serve-caddy smoke; do
+      "${BASH_SOURCE[0]}" "${next_stage}"
+    done
     ;;
   deploy-all)
     derive
